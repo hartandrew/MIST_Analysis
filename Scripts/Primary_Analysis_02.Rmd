@@ -2225,6 +2225,8 @@ dev.off()
 
 #Add metadata which identifies Crypto infected cells - This comes from a separate R markdown (Crypto_scData.Rmd) where the files are read and filtered and the names of cells which have reads mapping to crypto are exported as infection_vec
 ```{r}
+infection_vec <-read.csv("/data/hartandrew/MIST/SingleCell/Output/cp_infected_cellNames.csv")
+infection_vec <-infection_vec$x
 RNA_data$infected_cells = ifelse(colnames(RNA_data) %in% infection_vec, 'Infected', 'Not_Infected')
 Idents(RNA_data) <- "infected_cells"
 infected <- WhichCells(RNA_data, idents = c("Infected"))
@@ -2367,6 +2369,7 @@ Convert("/data/hartandrew/MIST/SingleCell/Output/Seurat_files/RNA_reduced.h5Seur
 ```
 #Save Rds file
 ```{r}
+#
 SaveSeuratRds(
   RNA_data,
   file = "/data/hartandrew/MIST/SingleCell/Output/Working_Seurat.Rds")
