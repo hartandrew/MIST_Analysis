@@ -1,0 +1,2378 @@
+---
+title: "Primary_Analysis_02"
+author: "AndrewHart"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r cars}
+summary(cars)
+```
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+#Load the Libraries
+```{r, warning=FALSE, error=FALSE}
+library(Seurat)
+library(Signac)
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(data.table)
+library(cowplot)
+library(scCustomize)
+library(forcats)
+library(ggbreak)
+library(presto)
+library(ggforce)
+library(SingleR)
+library(celldex)
+library(harmony)
+#library(Azimuth)
+library(glmGamPoi)
+library(future)
+library(dsb)
+library(RColorBrewer)
+library(monocle3)
+library(gt)
+options(future.globals.maxSize = 5000 * 1024^2)
+```
+
+#directory set up
+```{r}
+getwd() #/home/hartandrew
+setwd("/data/hartandrew/MIST/SingleCell")
+out <- "/data/hartandrew/MIST/SingleCell/Output"
+images <- "/data/hartandrew/MIST/SingleCell/Output/Images"
+```
+
+#Load the Saved merged seurat object generating from the processing_01_reduced.rmd script
+```{r}
+combined_Data <- LoadH5Seurat("/data/hartandrew/MIST/SingleCell/Output/Seurat_files/Combined_data.h5Seurat")
+
+```
+
+#Generate individual seurat objects for the RNA and Protein data
+```{r}
+#At this point, the RNA assay has only count (raw) layers and the ADT assay has both count (raw) and data (normalized) layers - as we expect
+combined_Data[["RNA"]] <- as(object = combined_Data[["RNA"]], Class = "Assay5")
+combined_Data[['RNA']]  <- JoinLayers(object = combined_Data[['RNA']]  )
+combined_Data[['RNA']] <-  split(x = combined_Data[['RNA']], f = combined_Data$orig.ident)
+Layers(combined_Data[['RNA']])
+
+#Split the combined and filtered data into the two assay for individual Integration
+RNA_data <- CreateSeuratObject(
+  combined_Data[["RNA"]],
+  project = "SeuratProject",
+  assay = "RNA",
+  names.field = 1,
+  names.delim = "_",
+  meta.data = combined_Data@meta.data)
+RNA_data
+#Check original identity
+table(RNA_data$orig.ident)
+```
+
+````{r}
+combined_Data[['ADT']] <-  split(x = combined_Data[['ADT']], f = combined_Data$orig.ident)
+Layers(combined_Data[['ADT']])
+
+ADT_data <- CreateSeuratObject(
+  combined_Data[["ADT"]],
+  project = "SeuratProject",
+  assay = "ADT",
+  names.delim = "_",
+  meta.data = combined_Data@meta.data)
+ADT_data
+
+#Check original identity
+table(ADT_data$orig.ident)
+table(ADT_data$Tissue)
+table(ADT_data$InfectionStatus)
+#Save number of cells per sample/per tissue/per infection
+ setwd(out)
+ write.csv(table(ADT_data$orig.ident), "Table_cells_per_sample.csv")
+ write.csv(table(ADT_data$Tissue), "Table_cells_per_Tissue.csv")
+ write.csv(table(ADT_data$InfectionStatus), "Table_cells_per_InfectionStatus.csv")
+```
+
+
+
+#RNA-BASED CLUSTERING before integration
+
+```{r}
+#This chunk - 8 minutes to run on server
+DefaultAssay(RNA_data) <- "RNA"
+RNA_data <- NormalizeData(RNA_data)
+RNA_data <- FindVariableFeatures(RNA_data, selection.method = "vst", nfeatures = 3000) #Original Analyses Used 2000 but given the diversity of the dataset, I thought it was not sufficient
+
+VariableFeaturePlot(RNA_data, cols = c("black", "red"),
+  pt.size = 0.1, log = NULL, selection.method = NULL, raster = FALSE) + scale_y_log10()
+
+all.genes <- rownames(RNA_data)
+RNA_data <- ScaleData(RNA_data, features = all.genes)
+RNA_data <- RunPCA(RNA_data, verbose = FALSE, reduction.name = "unintegrated_RNA_pca")
+
+ElbowPlot(RNA_data, reduction = "unintegrated_RNA_pca", ndims = 50)
+# Determine percent of variation associated with each PC
+pct <- RNA_data[["unintegrated_RNA_pca"]]@stdev / sum(RNA_data[["unintegrated_RNA_pca"]]@stdev) * 100
+# Calculate cumulative percents for each PC
+cumu <- cumsum(pct)
+# Determine which PC exhibits cumulative percent greater than 90% and % variation associated with the PC as less than 5
+co1 <- which(cumu > 90 & pct < 5)[1]
+co1 #Gives a very high number
+
+#Method 2 to determine the PC at which point the percentage of change in PC drops to <0.1 
+# Determine the difference between variation of PC and subsequent PC
+co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+# last point where change of % of variation is more than 0.1%.
+co2 #gives a very low number - usually this is the one that is more accurate
+#Visualize the total percent variation captured by the cumultaive PC chosen
+plot_df <- data.frame(pct = pct, 
+           cumu = cumu, 
+           rank = 1:length(pct))
+  ggplot(plot_df, aes(cumu, pct, label = rank)) + 
+  geom_text() + 
+  geom_vline(xintercept = 90, color = "grey") + 
+  geom_hline(yintercept = min(pct[pct > 5]), color = "grey") +
+  theme_bw()
+
+RNA_data <- FindNeighbors(RNA_data, dims = 1:20, reduction = "unintegrated_RNA_pca")
+RNA_data <- FindClusters(RNA_data, resolution = 2, verbose = FALSE, cluster.name = "unintegrated_RNA_clusters", group.singletons = F)
+RNA_data <- RunUMAP(RNA_data, dims = 1:20, reduction = "unintegrated_RNA_pca", reduction.name = "unintegrated_RNA_umap")
+RNA_umap_unint <- DimPlot(RNA_data, reduction = "unintegrated_RNA_umap", group.by = c("unintegrated_RNA_clusters", "Tissue", "InfectionStatus"), combine = FALSE)
+RNA_umap_unint
+```
+
+
+#INTEGRATE RNA (RPCA)
+```{r}
+#chunk takes 15 minutes
+options(future.globals.maxSize = 4000 * 1024^2)
+
+RNA_data <- IntegrateLayers(
+  object = RNA_data, method = RPCAIntegration, 
+  orig.reduction = "unintegrated_RNA_pca", new.reduction = "integrated.rpca",
+  verbose = FALSE)
+
+DefaultAssay(RNA_data) <- "RNA"
+RNA_data <- FindNeighbors(RNA_data, reduction = "integrated.rpca", dims = 1:20)
+RNA_data <- FindClusters(RNA_data, resolution = 2, cluster.name = "rpca_integration_clusters", group.singletons = F)
+RNA_data <- RunUMAP(RNA_data, reduction = "integrated.rpca", dims = 1:20, reduction.name = "umap.rpca")
+RNA_umap_rpca <- DimPlot(RNA_data, reduction = "umap.rpca", group.by = c("rpca_integration_clusters", "Tissue", "InfectionStatus"), combine = FALSE, label.size = 4, label = TRUE)
+RNA_umap_rpca
+```
+
+#Harmony Integration
+```{r}
+#chunk take XX minutes
+RNA_data <- IntegrateLayers(
+  object = RNA_data, method = HarmonyIntegration,
+  orig.reduction = "unintegrated_RNA_pca", new.reduction = "integrated.harmony",
+  verbose = FALSE)
+RNA_data <- FindNeighbors(RNA_data, reduction = "integrated.harmony", dims = 1:20)
+RNA_data <- FindClusters(RNA_data, resolution = 2, cluster.name = "harmony_integration_clusters", group.singletons = F)
+RNA_data <- RunUMAP(RNA_data, reduction = "integrated.harmony", dims = 1:20, reduction.name = "umap.harmony")
+RNA_umap_harmony <- DimPlot(RNA_data, reduction = "umap.harmony", group.by = c("harmony_integration_clusters", "Tissue", "InfectionStatus"),
+  combine = FALSE, label.size = 3)
+RNA_umap_harmony
+```
+
+# CEll Cycle Scoring
+```{r}
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can
+# segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes.updated.2019$s.genes
+g2m.genes <- cc.genes.updated.2019$g2m.genes
+
+# Basic function to convert human to mouse gene names
+library(biomaRt)
+convertHumanGeneList <- function(x){
+require("biomaRt")
+human <- useMart("ensembl", dataset = "hsapiens_gene_ensembl", host = "https://dec2021.archive.ensembl.org/") 
+mouse <- useMart("ensembl", dataset = "mmusculus_gene_ensembl", host = "https://dec2021.archive.ensembl.org/")
+genesV2 = getLDS(attributes = c("hgnc_symbol"), filters = "hgnc_symbol", values = x , mart = human, attributesL = c("mgi_symbol"), martL = mouse, uniqueRows=T)
+humanx <- unique(genesV2[, 2])
+# Print the first 6 genes found to the screen
+print(head(humanx))
+return(humanx)
+}
+m.s.genes <- convertHumanGeneList(s.genes)
+m.g2m.genes <- convertHumanGeneList(g2m.genes)
+
+DefaultAssay(RNA_data) <- "RNA"
+RNA_data <- JoinLayers(RNA_data)
+RNA_data <- CellCycleScoring(RNA_data, s.features = m.s.genes, g2m.features = m.g2m.genes, set.ident = TRUE)
+```
+
+```{r}
+DimPlot(RNA_data, reduction = "umap.rpca",   group.by = c( "Phase", "rpca_integration_clusters"),
+  combine = FALSE, label.size = 2, label = TRUE, raster = F)
+DimPlot(RNA_data, reduction = "umap.rpca",   group.by = c( "Phase"),
+  combine = FALSE, label.size = 2, label = TRUE, raster = F)
+
+```
+
+
+
+#Evaluate RNA-derived Clusters Manually
+```{r}
+FeaturePlot(RNA_data, reduction = "umap.rpca",features = c( "Epcam", "Olfm4", "Lgr5", "Dclk1", "Fcgr3", "Ncam1"))
+FeaturePlot(RNA_data, reduction = "umap.rpca",features = c("Ighd",  "Cd3e", "Cd14",  "Cd4", "Ptprc", "Cd8a", "Ly6c1", "Klrg1"))
+Genes <- as.data.frame(rownames(RNA_data[["RNA"]]))
+```
+
+
+
+#Identify Cluster Defining Genes
+```{r}
+#RNA_data <- JoinLayers(RNA_data)
+library(presto)
+Idents(object = RNA_data) <- "rpca_integration_clusters"
+RNA_rpca_markers <- FindAllMarkers(
+  RNA_data,
+  assay = "RNA",
+  features = NULL,
+  logfc.threshold = 0.1,
+  test.use = "wilcox",
+  slot = "data",
+  min.pct = 0.1,
+  min.diff.pct = -Inf,
+  node = NULL,
+  verbose = TRUE,
+  only.pos = FALSE,
+  max.cells.per.ident = Inf,
+  random.seed = 1,
+  min.cells.feature = 3,
+  min.cells.group = 3,
+  base = 2,
+  return.thresh = 0.01)
+```
+
+
+#Heatmap of RNA determined cluster genes
+```{r}
+RNA_rpca_markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1) %>%
+    slice_head(n = 5) %>%
+    ungroup() -> top5_RNA
+
+Idents(RNA_data) <- "rpca_integration_clusters"
+#captures count of cells for the ident with the fewest
+maxcells  <- min(table(Idents(RNA_data)))
+### nested object subsetting with downsampling
+DoHeatmap(subset(RNA_data, downsample = 100), features = top5_RNA$gene)+ NoLegend()
+```
+
+
+#ADT Clustering
+```{r}
+# define proteins to use in clustering (non-isotype controls)
+rownames(ADT_data)
+ADT_data
+ADT_data <- JoinLayers(ADT_data)
+FeatureScatter(ADT_data, feature1 = "CD19", feature2 = "CD4", pt.size = 1, group.by = "orig.ident")
+
+Idents(ADT_data) <- "orig.idents"
+Isotype_labels <- grep("isotype", rownames(ADT_data), ignore.case = TRUE, value = TRUE)
+prots = rownames(ADT_data)[!rownames(ADT_data) %in% Isotype_labels] #remove isotypes
+
+#ADT_data <- FindVariableFeatures(ADT_data) # Use all features and the dsb normalized instead
+ADT_data <- ScaleData(ADT_data, assay = "ADT")
+ADT_data <- RunPCA(ADT_data, features =prots, reduction.name = "unintegrated_pca_adt", reduction.key = "pcaADT_", verbose = FALSE)
+DimPlot(ADT_data, reduction = "unintegrated_pca_adt", group.by = "orig.ident")
+ElbowPlot(ADT_data, reduction = "unintegrated_pca_adt", ndims = 40)
+# Determine percent of variation associated with each PC
+pct <- ADT_data[["unintegrated_pca_adt"]]@stdev / sum(ADT_data[["unintegrated_pca_adt"]]@stdev) * 100
+# Calculate cumulative percents for each PC
+cumu <- cumsum(pct)
+# Determine which PC exhibits cumulative percent greater than 90% and % variation associated with the PC as less than 5
+co1 <- which(cumu > 90 & pct < 5)[1]
+co1 
+
+#Method 2 to determine the PC at which point the percentage of change in PC drops to <0.1 
+co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+# last point where change of % of variation is more than 0.1%.
+co2 
+#Visualize the total percent variation captured by the cumultaive PC chosen
+plot_df <- data.frame(pct = pct, 
+           cumu = cumu, 
+           rank = 1:length(pct))
+  ggplot(plot_df, aes(cumu, pct, label = rank)) + 
+  geom_text() + 
+  geom_vline(xintercept = 90, color = "grey") + 
+  geom_hline(yintercept = min(pct[pct > 5]), color = "grey") +
+  theme_bw()
+
+
+#There should be a way to find neighbors based on the normalized data and without using PCA - However, this method consistently crashed R 
+ADT_data <- FindNeighbors(object = ADT_data, dims = 1:20, features = VariableFeatures(object = ADT_data),
+                           k.param = 30, verbose = FALSE, reduction = "unintegrated_pca_adt" )
+
+#direct graph clustering 
+ADT_data <- FindClusters(ADT_data, resolution = 2,  graph.name = 'ADT_snn', verbose = FALSE, cluster.name = "unintegrated_ADT_clusters", group.singletons = F)
+#I get a failure when I try to run this - It appears some people 
+ADT_data <- RunUMAP(object = ADT_data, assay = "ADT", features = prots, 
+                      n.neighbors = 30,  verbose = FALSE, reduction.name = "umap.ADT.unintegrated")
+
+DimPlot(ADT_data, reduction = "umap.ADT.unintegrated", group.by = c("unintegrated_ADT_clusters", "Tissue", "InfectionStatus"),
+  combine = FALSE, label.size = 2, label = TRUE)
+```
+
+
+#Integrate the ADT data -
+```{r}
+DefaultAssay(ADT_data) <- "ADT"
+ADT_data[["ADT"]] <- split(ADT_data[["ADT"]], f = ADT_data$orig.ident)
+ADT_data <- IntegrateLayers(
+  object = ADT_data, method = RPCAIntegration, features = prots, 
+  orig.reduction = "unintegrated_pca_adt", new.reduction = "integrated.ADT.rpca", 
+  verbose = TRUE)
+ADT_data <- FindNeighbors(ADT_data, reduction = "integrated.ADT.rpca", dims = 1:20)
+ADT_data <- FindClusters(ADT_data, resolution = 2, cluster.name = "adt_integration_clusters", group.singletons = F)
+ADT_data <- RunUMAP(ADT_data, reduction = "integrated.ADT.rpca", dims = 1:20, reduction.name = "umap.integrated.ADT")
+ADT_data_umap_int <- DimPlot(ADT_data, reduction = "umap.integrated.ADT", group.by = c("adt_integration_clusters", "Tissue", "InfectionStatus"),combine = FALSE, label.size = 2)
+ADT_data_umap_int
+
+DimPlot(ADT_data, reduction = "umap.integrated.ADT", group.by = c("adt_integration_clusters"),combine = TRUE, label = T, label.size = 3) + NoLegend()
+
+  ggsave(
+  "ADT_based_integrated_UMAP_ADT_clusters.png",plot = last_plot(), device = NULL,
+  path = out,scale = 1, width = 5, height = 5,  units = c("in"),
+  dpi = 600, limitsize = TRUE, bg = NULL)
+
+```
+
+
+
+#Manually evaluate Protein Clusters
+```{r}
+DefaultAssay(ADT_data) <- "ADT"
+
+rownames(ADT_data)
+FeaturePlot(ADT_data, "CD4", reduction = "umap.integrated.ADT") + ggtitle("CD4 Protein") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(ADT_data, "CD8a", reduction = "umap.integrated.ADT") + ggtitle("CD8a Protein")+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(ADT_data, "CD19", reduction = "umap.integrated.ADT")+ ggtitle("CD19 Protein")+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(ADT_data, "IgD", reduction = "umap.integrated.ADT")+ ggtitle("IgD Protein")+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(ADT_data, "TCR.Bchain", reduction = "umap.integrated.ADT")+ ggtitle("TCRb Protein")+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(ADT_data, "Ly.6C", reduction = "umap.integrated.ADT")+ ggtitle("Ly6C Protein")+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(ADT_data, "NK.1.1", reduction = "umap.integrated.ADT")+ ggtitle("NK1.1 Protein")+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(ADT_data, "CD200", reduction = "umap.integrated.ADT")+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(ADT_data, "CD31", reduction = "umap.integrated.ADT")+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(ADT_data, "CD49b", reduction = "umap.integrated.ADT")+ ggtitle("CD49b Protein")+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(ADT_data, "CD49f", reduction = "umap.integrated.ADT")+ ggtitle("CD49f Protein") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(ADT_data, "CD79b", reduction = "umap.integrated.ADT")+ ggtitle("CD79b(Igb) Protein")+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(ADT_data, "CX3CR1", reduction = "umap.integrated.ADT")+ ggtitle("CX3CR1 Protein")+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(ADT_data, "CD3", reduction = "umap.integrated.ADT")+ ggtitle("CD3 Protein")+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(ADT_data, "CD5", reduction = "umap.integrated.ADT")+ ggtitle("CD5 Protein")	+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(ADT_data, "CD11b", reduction = "umap.integrated.ADT")+ ggtitle("CD11b Protein")+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(ADT_data, "XCR1", reduction = "umap.integrated.ADT")+ ggtitle("XCR1 Protein")	+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(ADT_data, "CD11c", reduction = "umap.integrated.ADT")+ ggtitle("CD11c Protein")	+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(ADT_data, "CD172a", reduction = "umap.integrated.ADT")+ ggtitle("CD172a(SIRPa) Protein")	+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+```
+
+#Find Markers For the ADT defined integrated  Clusters
+```{r}
+ADT_data #already joined which is required for differential analysis
+ADT_data <- JoinLayers(ADT_data)
+Idents(object = ADT_data) <- "adt_integration_clusters"
+ADT_markers <- FindAllMarkers(
+  ADT_data,
+  assay = "ADT",
+  features = NULL,
+  logfc.threshold = 0.1,
+  test.use = "wilcox",
+  slot = "data",
+  min.pct = 0.05,
+  min.diff.pct = -Inf,
+  node = NULL,
+  verbose = TRUE,
+  only.pos = FALSE,
+  max.cells.per.ident = Inf,
+  random.seed = 1,
+  min.cells.feature = 3,
+  min.cells.group = 3,
+  base = 2,
+  return.thresh = 0.01)
+ADT_markers
+ADT_markers_top <- ADT_markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1)
+
+```
+
+```{r}
+ADT_markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1) %>%
+    slice_head(n = 5) %>%
+    ungroup() -> top5_adt
+
+Idents(ADT_data) <- "adt_integration_clusters"
+### nested object subsetting with downsampling
+DoHeatmap(subset(ADT_data, downsample = 100), features = top5_adt$gene, raster = TRUE)+ NoLegend()
+```
+
+#Combine Data and perform WNN multimodal neighbor analysis and Umap Visualization
+```{R}
+
+#Add data from the ADT Data set
+RNA_data[["ADT"]]<-ADT_data[["ADT"]]
+RNA_data[["adt.cluster_unintergrated"]] <- ADT_data[["unintegrated_ADT_clusters"]]
+RNA_data[["unintegrated_pca_adt"]] <- ADT_data[["unintegrated_pca_adt"]]
+RNA_data[["umap_adt_unintegrated"]] <- ADT_data[["umap.ADT.unintegrated"]]
+RNA_data[["integrated.ADT.rpca"]] <- ADT_data[["integrated.ADT.rpca"]]
+RNA_data[["umap.integrated.ADT"]] <- ADT_data[["umap.integrated.ADT"]]
+
+RNA_data = FindMultiModalNeighbors(
+  RNA_data, reduction.list = list("integrated.rpca", "integrated.ADT.rpca"), 
+  dims.list = list(1:20, 1:20), 
+  modality.weight.name = "RNA.weight", 
+  knn.graph.name = "wknn",
+  snn.graph.name = "wsnn",
+  weighted.nn.name = "weighted.nn",
+  verbose = FALSE)
+
+RNA_data <- RunUMAP(RNA_data, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+RNA_data <- FindClusters(RNA_data, graph.name = "wsnn",  resolution = 2, verbose = FALSE, cluster.name = "WNN_clusters", n.start = 25, group.singletons = F)
+
+DimPlot(RNA_data, reduction = "wnn.umap",   group.by = c( "WNN_clusters", "Tissue", "InfectionStatus"),
+  combine = FALSE, label.size = 2, label = TRUE)
+```
+
+```{r}
+#Evaluate Cluster Genes
+Idents(RNA_data) <- "WNN_clusters"
+FeaturePlot(RNA_data, reduction = "wnn.umap",features = c("Ighd",  "Cd3e", "Cd14", "Cd4", "Ptprc",
+    "Cd8a", "Ly6c1", "Epcam"), raster = F)
+DefaultAssay(RNA_data) <- "RNA"
+FeaturePlot(RNA_data, reduction = "wnn.umap",features = c("Ptprc"), raster = F)
+FeaturePlot(RNA_data, reduction = "wnn.umap",features = c("Epcam"), raster = F) + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+ggsave("Epcam_expression_WNNumap.png",
+  plot = last_plot(), device = NULL, path = out,
+  scale = 1, width = 5,height = 5, units = c("in"), dpi = 600, limitsize = TRUE, bg = NULL)
+``` 
+
+#Cluster Method #2 Using Monocle
+```{r}
+library(SeuratWrappers)
+ cds <- as.cell_data_set(
+  RNA_data,
+  reductions = "wnn.umap",
+  default.reduction = "wnn.umap",
+  graph =  "wsnn",
+  group.by = NULL)
+ 
+#Monocle 3 trajectories require cluster partitions. Please run 'cluster_cells' on your cell_data_set object
+reducedDimNames(cds) <- "UMAP"
+cds <-cluster_cells(
+  cds,
+  reduction_method = "UMAP", resolution =  NULL,
+  k = 35, cluster_method =  "louvain",
+  num_iter = 2, partition_qval = 0.25, weight = TRUE, verbose = T )
+```
+
+
+```{r}
+#Visualize clusters Monocle   
+p1 <- plot_cells(cds, color_cells_by = "cluster", show_trajectory_graph = FALSE)
+p2 <- plot_cells(cds, color_cells_by = "partition", show_trajectory_graph = FALSE)
+p1|p2 
+
+Seurat_monocle <- as.Seurat(cds, assay = NULL)
+RNA_data[["Monocle_clusters"]] <- Seurat_monocle@meta.data$monocle3_clusters
+RNA_data[["Monocle_partitions"]] <- Seurat_monocle@meta.data$monocle3_partitions
+
+#Delete the temporary Seurat monocle object
+remove(Seurat_monocle)
+remove(cds)
+DimPlot(RNA_data, reduction = "wnn.umap",   group.by = c( "WNN_clusters", "Monocle_clusters"),
+  combine = FALSE, label.size = 2, label = TRUE, raster = F)
+```
+
+#Advanced Quality Control - Cell Cycle Effects
+```{r}
+#Visualize the CEll cycle across the UMAP
+DimPlot(RNA_data, reduction = "wnn.umap",   group.by = c( "WNN_clusters", "Monocle_clusters", "Phase"),
+  combine = FALSE, label.size = 2, label = TRUE, raster = F)
+```
+
+#assign annotations based on WNN clusters using SingleR
+```{r}
+
+ref <- celldex::ImmGenData()
+RNA_data <- JoinLayers(RNA_data)
+data_matrix <- RNA_data[["RNA"]]$data #Extract the normalized data into a matrix
+clusters_wnn <- RNA_data$WNN_clusters # make a vector out of your chosen Clusters you want to annotate
+RNA_data[['RNA']] <-  split(x = RNA_data[['RNA']], f = RNA_data$orig.ident) #a seurat v5 feature
+
+#Use singleR to determine clusters with immgen dataset
+# The labels category has multiple levels of granularity - you can try multiple. I recommend the one below
+Anno_RNA_singleR_wnn <- SingleR(method = "cluster",  data_matrix , ref = ref,
+    labels = ref$label.fine, clusters = clusters_wnn)
+#Make a new metadata column and apply annotations to appropriate clusters
+RNA_data[["SingleR.labels.wnn"]] <- 
+        Anno_RNA_singleR_wnn$labels[match(RNA_data[[]][["WNN_clusters"]], rownames(Anno_RNA_singleR_wnn))]
+#Look at new Annotations
+DimPlot(RNA_data, reduction = "wnn.umap",  group.by = c("SingleR.labels.wnn"),
+  combine = TRUE, label.size = 3, label = TRUE) + NoLegend()
+
+```
+
+#Generate a second automatic labeling to for comparizon (Azimuth)
+```{r}
+#options(timeout = max(1000, getOption("timeout")))
+#if (!require("BiocManager", quietly = TRUE))
+#install.packages("BiocManager")
+#BiocManager::install("BSgenome.Hsapiens.UCSC.hg38")
+#remotes::install_github('satijalab/azimuth', ref = 'master')
+```
+#RunAzimuth for a second set of automatical cell type annotations
+```{r}
+library(Azimuth)
+#create an duplcate dataset to run th Azimuth clustering on - make sure to delete after transfering umap and labels to save time
+RNA_data2 <- RNA_data
+DefaultAssay(RNA_data2) <- "RNA"
+RNA_data2 <- JoinLayers(RNA_data2)
+RNA_data2 <- RunAzimuth(RNA_data2, reference = "pbmcref", 
+  query.modality = "RNA", 
+  umap.name = "azimuth.umap")
+#Check assays - Do you have to re-add the ADT data? is normalized RNA there?
+
+RNA_data[["azimuth.umap"]]<-RNA_data2[["azimuth.umap"]]
+RNA_data[["predicted.celltype.l1.score"]] <- RNA_data2[["predicted.celltype.l1.score"]]
+RNA_data[["predicted.celltype.l1"]] <- RNA_data2[["predicted.celltype.l1"]]
+RNA_data[["predicted.celltype.l2.score"]] <- RNA_data2[["predicted.celltype.l2.score"]]
+RNA_data[["predicted.celltype.l2"]] <- RNA_data2[["predicted.celltype.l2"]]
+RNA_data[["predicted.celltype.l3"]] <- RNA_data2[["predicted.celltype.l3"]]
+RNA_data[["predicted.celltype.l3.score"]] <- RNA_data2[["predicted.celltype.l3.score"]]
+
+remove(RNA_data2)
+```
+
+#Plot both New annotations on the UMAP
+```{r}
+WNN_plot <- DimPlot(RNA_data, reduction = "wnn.umap",   group.by = c("WNN_clusters"),
+  combine = FALSE, label.size = 3.5, label = TRUE) 
+rpca_rna_plot <-DimPlot(RNA_data, reduction = "wnn.umap",   group.by = "rpca_integration_clusters", label.size = 3, label = TRUE, combine = T)+ NoLegend()
+singleR_plot <-DimPlot(RNA_data, reduction = "wnn.umap",   group.by = "SingleR.labels.wnn", label.size = 3, label = TRUE, repel = T, combine = T) +NoLegend()
+azimuth_plot <-DimPlot(RNA_data, reduction = "wnn.umap",   group.by  = "predicted.celltype.l2", label.size = 3, label = TRUE, repel = TRUE, combine = T) + NoLegend()
+
+rpca_rna_plot
+singleR_plot 
+azimuth_plot
+WNN_plot
+```
+
+
+#Manually evaluate Protein levels across clusters
+```{r}
+DefaultAssay(RNA_data) <- "ADT"
+FeaturePlot(RNA_data, "CD4", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CD4 Protein")
+FeaturePlot(RNA_data, "CD8a", reduction = "wnn.umap") + ggtitle("CD8a Protein")+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(RNA_data, "CD45R-B220", reduction = "wnn.umap") + ggtitle("B220 Protein")+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(RNA_data, "TCR.Bchain", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("TCRb Protein")
+FeaturePlot(RNA_data, "Ly.6C", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("Ly6C Protein")
+FeaturePlot(RNA_data, "NK.1.1", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("NK1.1 Protein")
+FeaturePlot(RNA_data, "CD19", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CD19 Protein")
+FeaturePlot(RNA_data, "CD200", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CD200 Protein") #endothelial
+FeaturePlot(RNA_data, "CD31", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CD200 Protein") #endothelial?
+FeaturePlot(RNA_data, "CD49b", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CD49b Protein")#potential epithelial marker and NK cell
+FeaturePlot(RNA_data, "CD49f", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CD49f Protein") #edo and epithelial?
+FeaturePlot(RNA_data, "CD79b", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CD79b(Igb) Protein")#B cell
+FeaturePlot(RNA_data, "CD127", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CX3CR1 Protein")
+FeaturePlot(RNA_data, "CD3", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CD3 Protein")
+```
+
+#Doublet Evaluation and removal
+```{r}
+#I converted the seurat object to a sce and saved as an RDS. Wiped the environment and cleared all loaded packages. Opened a new session. Loaded the local source-compiled version of irlba. read in the RDS file using readRDS and run the DblFinder - This only works if you have not loaded Seurat.
+#Create a single cell expeirment and save it RDS and move into a different R session
+SaveSeuratRds(
+  RNA_data,
+  file = "/data/hartandrew/MIST/SingleCell/Output/Working_Seurat.Rds")
+# Save the Rdata and move to a new R session where you will load only the packages necessary in an attempt to specifically use Matrix version compatible with scDblFinder
+
+RNA_data[["RNA"]] <- JoinLayers(RNA_data[["RNA"]])
+RNA_data.sce <- as.SingleCellExperiment(RNA_data, assay = "RNA")
+saveRDS(RNA_data.sce, "/data/hartandrew/MIST/SingleCell/Output/RNA_data.sce.rds")
+#After saving close everything - new session. No packages loaded. 
+
+#BiocManager::install("scDblFinder")
+#install.packages("irlba",type = "source") 
+
+library(scDblFinder)
+#Load the single cell experiment
+sce <- readRDS("/data/hartandrew/MIST/SingleCell/Output/RNA_data.sce.rds")
+#Manually load the irlba from the local user library (source compiled)
+sce <- scDblFinder(sce, samples="orig.ident", clusters="WNN_clusters")
+library(Seurat) # Reload all packages if needed
+RDS <- as.Seurat(sce)
+```
+
+```{r}
+#Visualize the results of the doublet call
+table(sce$scDblFinder.class)
+
+DimPlot(RDS, reduction = "WNN.UMAP", group.by = "scDblFinder.class")
+DimPlot(RDS, reduction = "WNN.UMAP", group.by = c("scDblFinder.class", "WNN_clusters"),
+  combine = TRUE, label.size = 3, label = TRUE) + NoLegend()
+DimPlot(RDS, reduction = "WNN.UMAP", group.by = c("scDblFinder.class", "Phase"),
+  combine = TRUE, label.size = 3, label = TRUE) + NoLegend()
+```
+
+```{r}
+#Transfer Doublet labels to Seurat object and remove doublets from the data set
+RNA_data[["Doublet"]] <-RDS[["scDblFinder.class"]] 
+RNA_data[["scDblFinder.weighted"]] <-RDS[["scDblFinder.weighted"]] 
+RNA_data[["scDblFinder.score"]] <-RDS[["scDblFinder.score"]]
+RNA_data[["scDblFinder.difficulty"]] <-RDS[["scDblFinder.difficulty"]]
+RNA_data[["scDblFinder.cxds_score"]] <-RDS[["scDblFinder.cxds_score"]]
+Idents(RNA_data) <- "Doublet"
+RNA_data <- subset(x = RNA_data, idents = "singlet")
+remove(RDS) 
+remove(sce)
+```
+
+
+#Reclustering after doublet removal
+```{r}
+#Recluster following doublet removal
+RNA_data = FindMultiModalNeighbors(
+  RNA_data, reduction.list = list("integrated.rpca", "integrated.ADT.rpca"), 
+  dims.list = list(1:20, 1:20), 
+  modality.weight.name = "RNA.weight", 
+  knn.graph.name = "wknn",
+  snn.graph.name = "wsnn",
+  weighted.nn.name = "weighted.nn",
+  verbose = FALSE)
+
+RNA_data <- RunUMAP(RNA_data, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_", seed.use = 12)
+RNA_data <- FindClusters(RNA_data, graph.name = "wsnn",  resolution = 2.5, verbose = FALSE, cluster.name = "WNN_clusters", n.start = 25, group.singletons = F)
+
+DimPlot(RNA_data, reduction = "wnn.umap",   group.by = c( "WNN_clusters", "Tissue", "InfectionStatus", "Phase"),
+  combine = FALSE, label.size = 2, label = TRUE)
+```
+
+
+```{r}
+#Evaluate Cluster Genes
+Idents(RNA_data) <- "WNN_clusters"
+FeaturePlot(RNA_data, reduction = "wnn.umap",features = c("Ighd",  "Cd3e", "Cd14", "Cd4", "Ptprc",
+    "Cd8a", "Ly6c1", "Epcam", "Dclk1"), raster = F)
+DefaultAssay(RNA_data) <- "RNA"
+FeaturePlot(RNA_data, reduction = "wnn.umap",features = c("Ptprc"), raster = F)
+FeaturePlot(RNA_data, reduction = "wnn.umap",features = c("Epcam"), raster = F) + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+ggsave("Epcam_expression_WNNumap.png",
+  plot = last_plot(), device = NULL, path = out,
+  scale = 1, width = 5,height = 5, units = c("in"), dpi = 600, limitsize = TRUE, bg = NULL)
+``` 
+
+#Cluster Method #2 Using Monocle - after removal of doublets
+```{r}
+library(SeuratWrappers)
+ cds <- as.cell_data_set(
+  RNA_data,
+  reductions = "wnn.umap",
+  default.reduction = "wnn.umap",
+  graph =  "wsnn",
+  group.by = NULL)
+ 
+#Monocle 3 trajectories require cluster partitions. Please run 'cluster_cells' on your cell_data_set object
+reducedDimNames(cds) <- "UMAP"
+cds <-cluster_cells(
+  cds,
+  reduction_method = "UMAP", resolution =  NULL,
+  k = 35, cluster_method =  "louvain",
+  num_iter = 2, partition_qval = 0.25, weight = TRUE, verbose = T )
+```
+
+
+```{r}
+#Visualize clusters Monocle - I don't find the parititions useful and don't believe they make sense  
+p1 <- plot_cells(cds, color_cells_by = "cluster", show_trajectory_graph = FALSE)
+p2 <- plot_cells(cds, color_cells_by = "partition", show_trajectory_graph = FALSE)
+p1|p2 
+
+Seurat_monocle <- as.Seurat(cds, assay = NULL)
+RNA_data[["Monocle_clusters"]] <- Seurat_monocle@meta.data$monocle3_clusters
+RNA_data[["Monocle_partitions"]] <- Seurat_monocle@meta.data$monocle3_partitions
+
+#Delete the temporary Seurat monocle object
+remove(Seurat_monocle)
+remove(cds)
+DimPlot(RNA_data, reduction = "wnn.umap",   group.by = c( "WNN_clusters", "Monocle_clusters"),
+  combine = FALSE, label.size = 2, label = TRUE, raster = F)
+```
+
+#SingleR defining WNN clusters after doublet removal
+```{r}
+
+#ref <- ImmGenData()
+RNA_data <- JoinLayers(RNA_data)
+data_matrix <- RNA_data[["RNA"]]$data #Extract the normalized data into a matrix
+clusters_wnn <- RNA_data$WNN_clusters # make a vector out of your chosen Clusters you want to annotate
+RNA_data[['RNA']] <-  split(x = RNA_data[['RNA']], f = RNA_data$orig.ident) #a seurat v5 feature
+
+#Use singleR to determine clusters with immgen dataset
+# The labels category has multiple levels of granularity - you can try multiple. I recommend the one below
+Anno_RNA_singleR_wnn <- SingleR(method = "cluster",  data_matrix , ref = ref,
+    labels = ref$label.fine, clusters = clusters_wnn)
+#Make a new metadata column and apply annotations to appropriate clusters
+RNA_data[["SingleR.labels.wnn"]] <- 
+        Anno_RNA_singleR_wnn$labels[match(RNA_data[[]][["WNN_clusters"]], rownames(Anno_RNA_singleR_wnn))]
+#Look at new Annotations
+DimPlot(RNA_data, reduction = "wnn.umap",  group.by = c("SingleR.labels.wnn"),
+  combine = TRUE, label.size = 3, label = TRUE) + NoLegend()
+
+```
+
+#Plot both New annotations on the UMAP
+```{r}
+WNN_plot <- DimPlot(RNA_data, reduction = "wnn.umap",   group.by = c("WNN_clusters"),
+  combine = T, label.size = 3.5, label = TRUE)  + NoLegend()
+singleR_plot <-DimPlot(RNA_data, reduction = "wnn.umap",   group.by = "SingleR.labels.wnn", label.size = 3, label = TRUE, repel = T, combine = T) +NoLegend()
+azimuth_plot <-DimPlot(RNA_data, reduction = "wnn.umap",   group.by  = "predicted.celltype.l2", label.size = 3, label = TRUE, repel = TRUE, combine = T) + NoLegend()
+monocle_plot <-DimPlot(RNA_data, reduction = "wnn.umap",   group.by  = "Monocle_clusters", label.size = 3, label = TRUE, repel = TRUE, combine = T) + NoLegend()
+
+singleR_plot 
+azimuth_plot
+WNN_plot
+monocle_plot
+```
+
+
+
+#Manually evaluate Protein levels across clusters
+```{r}
+DefaultAssay(RNA_data) <- "ADT"
+rownames(RNA_data[["ADT"]])
+FeaturePlot(RNA_data, "CD4", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CD4 Protein")
+FeaturePlot(RNA_data, "CD8a", reduction = "wnn.umap") + ggtitle("CD8a Protein")+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(RNA_data, "CD45R-B220", reduction = "wnn.umap") + ggtitle("B220 Protein")+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(RNA_data, "TCR.Bchain", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("TCRb Protein")
+FeaturePlot(RNA_data, "NK.1.1", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("NK1.1 Protein")
+FeaturePlot(RNA_data, "CD19", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CD19 Protein")
+FeaturePlot(RNA_data, "CD200", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CD200 Protein") #endothelial
+FeaturePlot(RNA_data, "CD31", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CD200 Protein") #endothelial?
+FeaturePlot(RNA_data, "CD49b", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CD49b Protein")#potential epithelial marker and NK cell
+FeaturePlot(RNA_data, "CD49f", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CD49f Protein") #edo and epithelial?
+FeaturePlot(RNA_data, "CD79b", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CD79b(Igb) Protein")#B cell
+FeaturePlot(RNA_data, "CD127", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CX3CR1 Protein")
+FeaturePlot(RNA_data, "CD3", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CD3 Protein")
+FeaturePlot(RNA_data, "CD5", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CD5 Protein")	
+FeaturePlot(RNA_data, "CD11b", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CD11b Protein") #cluster 12 - aslo express CD11c, CD86, Sirpa (DCs?)
+FeaturePlot(RNA_data, "CD38", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CD38 Protein")	
+FeaturePlot(RNA_data, "XCR1", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("ratXCR1 Protein")	
+FeaturePlot(RNA_data, "CD11c", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CD11c Protein")	
+FeaturePlot(RNA_data, "CD172a", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("CD172a(SIRPa) Protein")	
+FeaturePlot(RNA_data, "CD1d", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) 
+rownames(RNA_data[["ADT"]])
+FeaturePlot(RNA_data, "Epcam", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) 
+FeaturePlot(RNA_data, "CD24", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(RNA_data, "Ly.6C", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) + ggtitle("Ly6C Protein")
+FeaturePlot(RNA_data, "I.A-I.E", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) 
+FeaturePlot(RNA_data, "CD88", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(RNA_data, "F4-80", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) 
+FeaturePlot(RNA_data, "CD45", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) 
+#Protein CD88 and gene levels of Mrc1 (CD206) seem to identify a subset of monocytes - are these the macrophages?
+FeaturePlot(RNA_data, "Mrc1", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+FeaturePlot(RNA_data, "CD63", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) 
+FeaturePlot(RNA_data, "Adgre1", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) 
+FeaturePlot(RNA_data, "CD170", reduction = "wnn.umap") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues")) #Siglec F Eosinophils? New cluster
+
+
+```
+
+#3D visualize the clusters - are they convergent in space
+```{r}
+#Code for 3D visualization created by - Fahd Qadir, Saad Sadiq, & Juan Domínguez-Bendala. (2019, October 11). 3D Plotting of scRNAseq data using Seurat objects (Version 1.3). Zenodo. http://doi.org/10.5281/zenodo.3483177
+
+
+library(plotly)
+
+RNA_data <- RunUMAP(RNA_data, nn.name = "weighted.nn", reduction.name = "wnn.umap3D", reduction.key = "wnnUMAP3D_", n.components = 3L)
+# Visualize what headings are called so that you can extract them to form a dataframe
+Embeddings(RNA_data, reduction = "wnn.umap3D")
+# Prepare a dataframe for cell plotting
+plot.data <- FetchData(object = RNA_data, vars = c("wnnUMAP3D_1", "wnnUMAP3D_2", "wnnUMAP3D_3", "WNN_clusters"))
+# Make a column of row name identities (these will be your cell/barcode names)
+plot.data$label <- paste(rownames(plot.data))
+
+fig <- plot_ly(data = plot.data, 
+        x = ~wnnUMAP3D_1, y = ~wnnUMAP3D_2, z = ~wnnUMAP3D_3, 
+        color = ~WNN_clusters,
+        type = "scatter3d", 
+        mode = "markers", 
+        marker = list(size = 5, width=2), # controls size of points
+        text=~label, #This is that extra column we made earlier for which we will use for cell ID
+        hoverinfo="text")
+
+# xaxis
+axx <- list(
+  nticks = 4,
+  range = c(-10,10) #select range of xaxis
+)
+# yaxis
+axy <- list(
+  nticks = 4,
+  range = c(-10,10) #select range of yaxis
+)
+#zaxis
+axz <- list(
+  nticks = 4,
+  range = c(-10,10) #select range of zaxis
+  )
+
+fig <- fig %>% layout(scene = list(xaxis=axx,yaxis=axy,zaxis=axz))
+fig_cube <- fig %>% layout(scene = list(xaxis=axx,yaxis=axy,zaxis=axz, aspectmode='cube')) # To maintain cubic aspect
+fig
+fig_cube
+
+```
+
+```{r}
+#Plot markers on the 3D plot
+
+#Plot a gene
+DefaultAssay(RNA_data) <- "RNA"
+plot.data <- FetchData(object = RNA_data, vars = c("wnnUMAP3D_1", "wnnUMAP3D_2", "wnnUMAP3D_3", "Muc2"), layer = "scale.data")
+# Say you want change the scale, so that every cell having an expression >1 will be one color
+
+plot.data$changed <- ifelse(test = plot.data$Muc2 <1, yes = plot.data$Muc2, no = 1)
+
+# Add the label column, so that now the column has 'cellname-its expression value'
+plot.data$label <- paste(rownames(plot.data)," - ", plot.data$Muc2, sep="")
+
+# Plot your data, in this example my Seurat object had 21 clusters (0-20), and cells express a gene called ACTB
+plot_ly(data = plot.data, 
+        x = ~wnnUMAP3D_1, y = ~wnnUMAP3D_2, z = ~wnnUMAP3D_3, 
+        color = ~changed, # you can just run this against the column for the gene as well using ~ACTB, the algorith will automatically scale in that case based on maximal and minimal values
+        opacity = .5,
+        colors = c('navy', 'grey'), 
+        type = "scatter3d", 
+        mode = "markers",
+        marker = list(size = 5, width=2), 
+        text=~label,
+        hoverinfo="text"
+)
+
+
+```
+
+
+
+#Run Tilted CCA - What components of ADT data might be useful for clustering 
+```{r}
+ncol(ADT_data[["ADT"]])
+ncol(RNA_data[["RNA"]])
+
+#I need the graphs from the ADT_clustering that was performed in order to perform tilted CCA - they cannot be directly transferred because I have subsetting the data to remove doublets. I will also need to remove the doublets from the ADT_data
+cells <- colnames(RNA_data[["RNA"]])
+ADT_data$Cellname <- colnames(ADT_data[["ADT"]])
+ADT_data <- subset(ADT_data, subset = Cellname %in% cells) #this removed doublets
+RNA_data[["ADT_snn"]] <- ADT_data[["ADT_snn"]]
+RNA_data[["adt_integrated_clusters"]] <- ADT_data[["adt_integration_clusters"]]
+
+DefaultAssay(RNA_data) <- "RNA"
+mat_1 <- Matrix::t(RNA_data[["RNA"]]$data[VariableFeatures(object = RNA_data, nfeatures = 3000),])
+Seurat::DefaultAssay(RNA_data) <- "ADT"
+mat_2 <- Matrix::t(RNA_data[["ADT"]]$data)
+
+#remove genes/proteins with negligible standard deviation
+mat_1b <- mat_1
+sd_vec <- sparseMatrixStats::colSds(mat_1b)
+if(any(sd_vec <= 1e-6)){
+  mat_1b <- mat_1b[,-which(sd_vec <= 1e-6)]
+}
+
+mat_2b <- mat_2
+sd_vec <- sparseMatrixStats::colSds(mat_2b)
+if(any(sd_vec <= 1e-6)){
+  mat_2b <- mat_2b[,-which(sd_vec <= 1e-6)]
+}
+#library("devtools")
+#devtools::install_github("linnykos/tiltedCCA")
+library(tiltedCCA)
+multiSVD_obj <- tiltedCCA::create_multiSVD(mat_1 = mat_1b, mat_2 = mat_2b,
+                                           dims_1 = 1:20, dims_2 = 1:20,
+                                           center_1 = T, center_2 = T,
+                                           normalize_row = T,
+                                           normalize_singular_value = T,
+                                           recenter_1 = F, recenter_2 = F,
+                                           rescale_1 = F, rescale_2 = F,
+                                           scale_1 = T, scale_2 = T,
+                                           verbose = 1)
+
+
+
+
+#We then pass in the clusterings (one for the RNA, one for the ADT) as well as form metacells via tiltedCCA::form_metacells
+multiSVD_obj <- tiltedCCA::form_metacells(input_obj = multiSVD_obj,
+                                          large_clustering_1 = as.factor(RNA_data$rpca_integration_clusters), 
+                                          large_clustering_2 = as.factor(RNA_data$adt_integrated_clusters), 
+                                          num_metacells = 7000,
+                                          verbose = 1)
+
+multiSVD_obj <- tiltedCCA::compute_snns(input_obj = multiSVD_obj,
+                                        latent_k = 20,
+                                        num_neigh = 30,
+                                        bool_cosine = T,
+                                        bool_intersect = F,
+                                        min_deg = 30,
+                                        verbose = 2)
+
+
+
+multiSVD_obj <- tiltedCCA::tiltedCCA(input_obj = multiSVD_obj,
+                                     verbose = 1)
+
+#This is the most coputationally taxing
+multiSVD_obj <- tiltedCCA::fine_tuning(input_obj = multiSVD_obj,
+                                       verbose = 1)
+
+
+
+multiSVD_obj <- tiltedCCA::tiltedCCA_decomposition(input_obj = multiSVD_obj,
+                                                   verbose = 1)
+
+set.seed(10)
+RNA_data[["common_tcca"]] <- tiltedCCA::create_SeuratDim(input_obj = multiSVD_obj,
+                                                   what = "common",
+                                                   aligned_umap_assay = "wnn.umap",
+                                                   seurat_obj = RNA_data,
+                                                   seurat_assay = "RNA",
+                                                   verbose = 1)
+set.seed(10)
+RNA_data[["distinct1_tcca"]] <- tiltedCCA::create_SeuratDim(input_obj = multiSVD_obj,
+                                                      what = "distinct_1",
+                                                      aligned_umap_assay = "wnn.umap",
+                                                      seurat_obj = RNA_data,
+                                                      seurat_assay = "RNA",
+                                                      verbose = 1)
+set.seed(10)
+RNA_data[["distinct2_tcca"]] <- tiltedCCA::create_SeuratDim(input_obj = multiSVD_obj,
+                                                      what = "distinct_2",
+                                                      aligned_umap_assay = "wnn.umap",
+                                                      seurat_obj = RNA_data,
+                                                      seurat_assay = "RNA",
+                                                      verbose = 1)
+```
+
+```{r}
+#Visualize the tiltedCCA results
+p1 <- Seurat::DimPlot(RNA_data, 
+                      reduction = "common_tcca",
+                      group.by = "WNN_clusters", 
+                      #cols = col_palette, 
+                      label = T, repel = T, label.size = 2.5)
+p1 <- p1 + Seurat::NoLegend()
+p1 <- p1 + ggplot2::ggtitle("Common") + ggplot2::labs(x = "", y = "")
+p1 <- p1 + ggplot2::theme(legend.text = ggplot2::element_text(size = 5))
+
+p2 <- Seurat::DimPlot(RNA_data, 
+                      reduction = "distinct1_tcca",
+                      group.by = "WNN_clusters", 
+                      #cols = col_palette, 
+                      label = T, repel = T, label.size = 2.5)
+p2 <- p2 + Seurat::NoLegend()
+p2 <- p2 + ggplot2::ggtitle("RNA Distinct") + ggplot2::labs(x = "", y = "")
+p2 <- p2 + ggplot2::theme(legend.text = ggplot2::element_text(size = 5))
+
+p3 <- Seurat::DimPlot(RNA_data, 
+                      reduction = "distinct2_tcca",
+                      group.by = "WNN_clusters", 
+                      #cols = col_palette, 
+                      label = T, repel = T, label.size = 2.5)
+p3 <- p3 + Seurat::NoLegend()
+p3 <- p3 + ggplot2::ggtitle("ADT Distinct") + ggplot2::labs(x = "", y = "")
+p3 <- p3 + ggplot2::theme(legend.text = ggplot2::element_text(size = 5))
+ 
+p1 | p2 | p3
+
+```
+
+```{r}
+#I will need to return to this after working on the clusters
+#This does not work on WNN_clusters - I believe because WNN clusters is the result of two assays - It seems to work fine when I use the rpca clusters which only link to the RNA
+RNA_data@meta.data$WNN_clusters2 <- as.character(RNA_data@meta.data$SingleR.labels.wnn)
+membership_vec <- factor(as.character(RNA_data$rpca_integration_clusters))
+cell_enrichment_res <- tiltedCCA::postprocess_cell_enrichment(
+  input_obj = multiSVD_obj, 
+  membership_vec = membership_vec, 
+  max_subsample = 1000,
+  verbose = 1)
+unique(membership_vec)
+library(RColorBrewer)
+n <- 65
+qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
+col_vector = unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+col_pallete <- sample(col_vector, n)
+#We can then visualize these cell-type enrichments. Observe that in the left plot, the values go from 1 to 0 (along the x-axis), while in the right plot, the values go from 0 to 1 (along the x-axis). To read this plot, each cell type is represented as a dot (with color in col_palette). The higher a cell type is on the y-axis, the more it means that a cell type's separation from all other cell types is supported by both modalities. The more a cell type is to the extremes of the plot (i.e., a value of 1 on either of the x-axis), the more it means there is extra information in that modality that separates that cell type from other cell types that is not reflect in the other modality. The y-axis value for each cell type is the same in each plot. - from the tilted CCA vignettes
+tiltedCCA::plot_cell_enrichment(cell_enrichment_res,
+                                col_palette = col_pallete,
+                                cex_axis = 1.25,
+                                cex_lab = 1.5,
+                                xlab_1 = "RNA Distinct",
+                                xlab_2 = "ADT Distinct")
+
+
+
+```
+
+
+#Regress out cell cycling  - repeat PCA, integration, and WNN 
+```{r}
+
+#In previous iterations, I have seen that multiple clusters are derived from shared cell cylcing despite consisting of diverse and distinct cells - I will regress out cell cycle to examine how the clusters now fall
+
+RNA_data[["RNA"]]
+RNA_only <- RNA_data[["RNA"]]
+RNA_only <-CreateSeuratObject(RNA_only)
+RNA_only[["RNA"]] <- as(RNA_only[["RNA"]], "Assay")
+RNA_only[["S.Score"]] <- RNA_data[["S.Score"]]
+RNA_only[["G2M.Score"]] <- RNA_data[["G2M.Score"]]
+
+DefaultAssay(RNA_only) <- "RNA"
+options(future.globals.maxSize = 8000 * 1024^2)
+#RNA_only<-  ScaleData(RNA_only, vars.to.regress = c("S.Score", "G2M.Score"), features = all.genes, assay = "RNA")
+#Saved here 
+RNA_only <- RunPCA(RNA_only, verbose = FALSE, reduction.name = "unintegrated_RNA_pca_cc")
+DimPlot(RNA_only, reduction = "unintegrated_RNA_pca_cc" )
+DimPlot(RNA_data, reduction = "unintegrated_RNA_pca" )
+RNA_only <- Convert_Assay(seurat_object = RNA_only, convert_to = "v5")
+RNA_only[['RNA']] <-  split(x = RNA_only[['RNA']], f = RNA_only$orig.ident)
+DefaultAssay(RNA_only)
+RNA_only <- IntegrateLayers(
+  object = RNA_only, method = RPCAIntegration, assay = "RNA", features = VariableFeatures(RNA_only, nfeatures = 3000),
+  orig.reduction = "unintegrated_RNA_pca_cc", new.reduction = "integrated.rpca_cc",
+  verbose = T)
+RNA_only <- FindNeighbors(RNA_only, reduction = "integrated.rpca_cc", dims = 1:20)
+RNA_only <- FindClusters(RNA_only, resolution = 2, cluster.name = "rpca_integration_clusters_cc", group.singletons = F)
+RNA_only <- RunUMAP(RNA_only, reduction = "integrated.rpca_cc", dims = 1:20, reduction.name = "umap.rpca_cc")
+#Transfer the previous phase ID 
+RNA_only[["Phase"]] <- RNA_data[["Phase"]]
+q1<- DimPlot(RNA_only, reduction = "umap.rpca_cc", group.by = c( "Phase"), combine = TRUE, label.size = 4, label = TRUE)+ NoLegend()
+q2 <- DimPlot(RNA_data, reduction = "umap.rpca", group.by = c("Phase"), combine = TRUE, label.size = 4, label = TRUE) + NoLegend()
+q1 | q2
+
+#There is slightly less clustering based on cell cycle in the two plots 
+RNA_data[["integrated.rpca_cc"]] <- RNA_only[["integrated.rpca_cc"]]
+
+RNA_data = FindMultiModalNeighbors(
+  RNA_data, reduction.list = list("integrated.rpca_cc", "integrated.ADT.rpca"), 
+  dims.list = list(1:20, 1:20), 
+  modality.weight.name = "RNA.weight", 
+  knn.graph.name = "wknn_cc",
+  snn.graph.name = "wsnn_cc",
+  weighted.nn.name = "weighted.nn_cc",
+  verbose = FALSE)
+
+
+```
+
+```{r}
+#compare clusters and Umaps before and after CC regression
+DefaultAssay(RNA_data) <- "RNA"
+RNA_data <- RunUMAP(RNA_data, nn.name = "weighted.nn_cc", reduction.name = "wnn.umap_cc", reduction.key = "wnnUMAPcc_")
+RNA_data <- FindClusters(RNA_data, graph.name = "wsnn_cc",  resolution = 2, verbose = FALSE, cluster.name = "WNN_clusters_cc", n.start = 25, group.singletons = F)
+
+q1 <- DimPlot(RNA_data, reduction = "wnn.umap_cc",   group.by = c( "WNN_clusters_cc"),
+  combine = T, label.size = 2, label = TRUE)
+q2 <- DimPlot(RNA_data, reduction = "wnn.umap",   group.by = c("WNN_clusters"),
+  combine = T, label.size = 2, label = TRUE)
+q1 | q2
+
+FeaturePlot(RNA_data, reduction = "wnn.umap_cc", features = "CD200" )
+
+```
+
+
+
+
+#Determine Genes and ADT markers based on WNN clusters
+```{r}
+library(presto)
+DefaultAssay(RNA_data) <- "ADT"
+Idents(object = RNA_data) <- "WNN_clusters"
+WNN_ADT_markers <- FindAllMarkers(
+  RNA_data,
+  assay = "ADT",
+  features = NULL,
+  logfc.threshold = 0.1,
+  test.use = "wilcox",
+  slot = "data",
+  min.pct = 0.05,
+  min.diff.pct = -Inf,
+  node = NULL,
+  verbose = TRUE,
+  only.pos = FALSE,
+  max.cells.per.ident = Inf,
+  random.seed = 1,
+  min.cells.feature = 3,
+  min.cells.group = 3,
+  base = 2,
+  return.thresh = 0.01)
+WNN_ADT_markers
+WNN_ADT_markers_top <- WNN_ADT_markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1)
+
+
+DefaultAssay(RNA_data) <- "RNA"
+Idents(object = RNA_data) <- "WNN_clusters"
+WNN_RNA_markers <- FindAllMarkers(
+  RNA_data,
+  assay = "RNA",features = NULL, logfc.threshold = 0.1,
+  test.use = "wilcox",  slot = "data",
+  min.pct = 0.05, min.diff.pct = -Inf,
+  node = NULL, verbose = TRUE,
+  only.pos = FALSE, max.cells.per.ident = Inf,
+  random.seed = 1,  min.cells.feature = 3, min.cells.group = 3,
+  base = 2,
+  return.thresh = 0.01)
+WNN_RNA_markers
+WNN_RNA_markers_top <- WNN_RNA_markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1)
+setwd(out)
+write.csv(WNN_RNA_markers, "WNN_Cluster_markers_RNA.csv")
+setwd(version)
+write.csv(WNN_RNA_markers, "WNN_Cluster_markers_RNA.csv")
+setwd(out)
+write.csv(WNN_ADT_markers, "WNN_Cluster_markers_ADT.csv")
+setwd(version)
+write.csv(WNN_ADT_markers, "WNN_Cluster_markers_ADT.csv")
+```
+
+
+#Investigate the clusters and annotations - the annotations ....
+```{r}
+Idents(RNA_data) <- "WNN_clusters"
+ markers_43_rna<- FindMarkers(
+  RNA_data,
+  assay = "RNA",
+  ident.1 = "43", 
+  features = NULL,
+  logfc.threshold = 0.1,  test.use = "wilcox",
+  slot = "data",
+  min.pct = 0.05, max.cells.per.ident = Inf, random.seed = 1, min.cells.feature = 3,
+  min.cells.group = 3,
+  base = 2, return.thresh = 0.01)
+ markers_43_rna$pct_change <- markers_43_rna$pct.1-markers_43_rna$pct.2
+  markers_43_rna$gene <- rownames(markers_43_rna)
+ markers_52_adt<- FindMarkers(
+  RNA_data,
+  assay = "ADT",
+  ident.1 = "52", ident.2 = c("35", "15", "29", "1"),
+  features = NULL,
+  logfc.threshold = 0.1,  test.use = "wilcox",
+  slot = "data",
+  min.pct = 0.05, max.cells.per.ident = Inf, random.seed = 1, min.cells.feature = 3,
+  min.cells.group = 3,
+  base = 2, return.thresh = 0.01)
+ 
+markers_52_adt$pct_change <- markers_52_adt$pct.1-markers_52_adt$pct.2
+```
+
+
+
+#Labeling the Epithelial compartment. I used two studies where genes for major components of the intestinal compartment are named. 
+#One is Haber, A. L.,  O., … Regev, A. (2017). https://doi.org/10.1038/nature24489
+#Pardy, R. D., Walzer, K. A.,  Hunter, C. A. (2024). https://doi.org/10.1371/journal.ppat.1011820
+#Generate epithelial labels
+```{r}
+#Intestinal Epithelial Stem cells 
+
+DefaultAssay(RNA_data) <- "RNA"
+RNA_data <- JoinLayers(RNA_data)
+stem_features <- list(c(
+  'Lgr5',
+  'Ascl2',
+  'Slc12a2',
+  'Axin2',
+  'Olfm4', 
+  'Gkn3'
+))
+RNA_data <- AddModuleScore(
+  object = RNA_data,
+  features = stem_features,
+  ctrl = 10,
+  name = 'StemCell_Features'
+)
+ VlnPlot(RNA_data, features = c("Olfm4"), pt.size = 0, group.by = "WNN_clusters") + NoLegend() +  theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+            strip.background = element_rect(fill = "grey85", 
+                colour = "grey20"), axis.title.x = element_blank(),  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+ names(x = RNA_data[[]])
+ FeaturePlot(object = RNA_data, reduction = "wnn.umap",  features = "StemCell_Features1") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+ #These cells belong to CLuster 40? perhaps cluster 28
+ 
+ggsave(
+  "ISC_ModuleScore_Umap.png",
+  plot = last_plot() ,
+  device = NULL,
+  path = out,
+  scale = 1,
+  width = 6,
+  height = 6,
+  units = c("in"),
+  dpi = 600,
+  limitsize = TRUE,
+  bg = NULL)
+```
+
+```{r}
+#Enteroendocrine cells 
+DefaultAssay(RNA_data) <- "RNA"
+
+stem_features <- list(c(
+  'Chga',
+  'Chgb',
+  'Tac1',
+  'Tph1', 
+  'Neurog3'
+))
+RNA_data <- AddModuleScore(
+  object = RNA_data,
+  features = stem_features,
+  ctrl = 10,
+  name = 'Enteroendocrine_Features'
+)
+ VlnPlot(RNA_data, features = c("Chgb"), pt.size = 0, group.by = "WNN_clusters") + NoLegend() +  theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+            strip.background = element_rect(fill = "grey85", 
+                colour = "grey20"), axis.title.x = element_blank(),  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+
+ FeaturePlot(object = RNA_data, reduction = "wnn.umap",  features = "Enteroendocrine_Features1") + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+ #These cells belong to CLuster 65
+
+```
+
+```{r}
+#Tuft cells (I already found these based on DCLK1 but we can see if the larger marker panel confirms)
+DefaultAssay(RNA_data) <- "RNA"
+
+stem_features <- list(c(
+  'Dclk1',
+  'Gnat3',
+  'Plcb2',
+  'Trpm5', 
+  'Il25',
+  'Tslp'
+))
+RNA_data <- AddModuleScore(
+  object = RNA_data,
+  features = stem_features,
+  ctrl = 10,
+  name = 'Tuft_Features'
+)
+ VlnPlot(RNA_data, features = c("Tslp"), pt.size = 0, group.by = "WNN_clusters") + NoLegend() +  theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+            strip.background = element_rect(fill = "grey85", 
+                colour = "grey20"), axis.title.x = element_blank(),  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+
+ FeaturePlot(object = RNA_data, reduction = "wnn.umap",  features = "Tuft_Features1")  + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+ #These cells belong to CLuster 51
+
+```
+
+```{r}
+#Goblet Cells
+DefaultAssay(RNA_data) <- "RNA"
+
+stem_features <- list(c(
+  'Clca1',
+  'Zg16',
+  'Agr2', 
+  'Muc2', 
+  'Fcgbp'
+))
+RNA_data <- AddModuleScore(
+  object = RNA_data,
+  features = stem_features,
+  ctrl = 10,
+  name = 'Goblet_Features'
+)
+ VlnPlot(RNA_data, features = c("Muc2"), pt.size = 0, group.by = "WNN_clusters") + NoLegend() +  theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+            strip.background = element_rect(fill = "grey85", 
+                colour = "grey20"), axis.title.x = element_blank(),  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+ names(x = RNA_data[[]])
+  FeaturePlot(object = RNA_data, reduction = "wnn.umap",  features = "Goblet_Features1", raster= F) + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+ #These cells belong to CLuster 23
+  
+   FeaturePlot(object = RNA_data, reduction = "wnn.umap",  features = "Lyz1", raster = FALSE)+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+
+```
+
+```{r}
+#Paneth Cells #None of the genes which encode for alpha defensins are in the data - though they exist in the raw format prior to Azimuth - 
+DefaultAssay(RNA_data) <- "RNA"
+
+stem_features <- list(c(
+  'Defa20',
+  'Defa22',
+  'Defa21', 
+  'Gm15308', 
+  'Defa17',
+  'Clps', 
+  'Defa23', 
+  'Gm15299',
+  'Lyz1', 
+  'Mptx2'
+))
+RNA_data <- AddModuleScore(
+  object = RNA_data,
+  features = stem_features,
+  ctrl = 10,
+  name = 'Paneth_Features'
+)
+ VlnPlot(RNA_data, features = c("Lyz1"), pt.size = 0, group.by = "WNN_clusters") + NoLegend() +  theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+            strip.background = element_rect(fill = "grey85", 
+                colour = "grey20"), axis.title.x = element_blank(),  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+
+
+
+ FeaturePlot(object = RNA_data, reduction = "wnn.umap",  features = "Lyz1", raster = FALSE)+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+  FeaturePlot(object = RNA_data, reduction = "wnn.umap",  features = "Paneth_Features1", raster = FALSE)+ scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+ ggsave(
+  "PanethCell_ModuleScore_Umap.png",
+  plot = last_plot() ,
+  device = NULL,
+  path = out,
+  scale = 1,
+  width = 6,
+  height = 6,
+  units = c("in"),
+  dpi = 600,
+  limitsize = TRUE,
+  bg = NULL)
+
+```
+
+
+#Determine PRELIMINARY clusters using information from combined annotations/research
+```{r}
+#The assignment of cell types to cluters is based on many things - mostly I compared the Azimuth generated and Single R generated automatic labels - They were often in good agreement. I also used the epithelial based clustering above for some epithelial subsets, finally, I used CEllxGene to interactively visualize the genes expressed in various clusters to check some of the labels. However, more work is needed and the terms that I have given each cell type are personal rather than scientific
+Idents(RNA_data) <- "WNN_clusters_cc"
+Epithelial <- c("5","9", "10", "11", "12",  "13", "16", "17" ,"19", "21", "22", "29", "62", "64")
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc %in% Epithelial] <- "Enterocyte"
+B <- c("0", "1", "2", "15", "24", "37", "58", "59", "65")
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc %in% B] <- "B Cell"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="4" ] <- "CD4 Naive"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="49"] <- "Activated cDC"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="6" | RNA_data$WNN_clusters_cc=="23" | RNA_data$WNN_clusters_cc=="28"] <- "CD4 TCM"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="42"] <- "CD4 NKT"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="8" ] <- "CD8 Activated"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="7" | RNA_data$WNN_clusters_cc=="18" ] <- "gdT cell"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="3" ] <- "CD8 Naive"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="41"  | RNA_data$WNN_clusters_cc=="48"] <- "CD8 Proliferating"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="30"  | RNA_data$WNN_clusters_cc=="31"] <- "CD8 TCM"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="51"] <- "CD8 TEM"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="44" | RNA_data$WNN_clusters_cc=="53" |RNA_data$WNN_clusters_cc=="57" ] <- "cDC"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="55" ] <- "EEC"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="52" ] <- "Endothelial BEC"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="27" ] <- "Endothelial LEC"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="33" ] <- "Erythrocytes"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="32"  |RNA_data$WNN_clusters_cc=="36" |RNA_data$WNN_clusters_cc=="39"] <- "Fibroblasts"
+
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="43"  |RNA_data$WNN_clusters_cc=="60"] <- "IgA PCs"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="45" ] <- "ILC2"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="26"] <- "ILC3"
+
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="25" ] <- "Monocytes"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="38" ] <- "Neutrophils"
+
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="40" ] <- "NK Cell"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="56" ] <- "pDC"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="20" ] <- "SC_TA"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="61" | RNA_data$WNN_clusters_cc=="66" | RNA_data$WNN_clusters_cc=="63" | RNA_data$WNN_clusters_cc=="singleton" ] <- "Singletons"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="46" ] <- "Stromal Cell"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="50" ] <- "Cycling T cell"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="14" ] <- "Tregs"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="54" ] <- "Tuft Cells"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="35" ] <- "GC B Cells"
+RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="47"| RNA_data$WNN_clusters_cc=="34"] <- "Goblet Cells"
+
+
+
+```
+
+```{r}
+#visualize new clusters
+DimPlot(RNA_data, reduction = "wnn.umap_cc",   group.by = "PreliminaryClusters",
+  combine = TRUE, label.size = 2.5, label = TRUE, repel = TRUE, raster = F) + NoLegend()
+FeaturePlot(RNA_data,  reduction = "wnn.umap_cc", features = "Jchain")
+
+```
+
+
+
+#Example Subclustering if necessary
+
+```{r}
+Idents(RNA_data) <- "WNN_clusters_cc"
+cluster_34_all_cells <- WhichCells(RNA_data, idents = "34")
+RNA_data <- FindSubCluster(
+  RNA_data,
+  "34",
+  graph.name = "wsnn" ,
+  subcluster.name = "sub.cluster_34",
+  resolution = 0.05,
+  algorithm = 1
+)
+
+DimPlot(RNA_data, reduction = "wnn.umap_cc",   group.by = "sub.cluster_34", label.size = 3, label = TRUE, repel = TRUE, raster = FALSE, cells.highlight = cluster_34_all_cells)+ NoLegend()
+
+DimPlot(RNA_data, reduction = "wnn.umap_cc",   group.by = "sub.cluster_34", label.size = 3, label = TRUE, repel = TRUE, raster = FALSE, cells = cluster_34_all_cells)+ NoLegend()
+#Find which subcluster shows the paneth cell markers
+FeaturePlot(RNA_data,  reduction = "wnn.umap_cc", cells = cluster_34_all_cells, features = "Lyz1")
+ VlnPlot(RNA_data, features = c("Paneth_Features1"), pt.size = 0, group.by = "sub.cluster_34") + NoLegend() +  theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+            strip.background = element_rect(fill = "grey85", 
+                colour = "grey20"), axis.title.x = element_blank(),  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+ 
+ RNA_data@meta.data$PreliminaryClusters[RNA_data$WNN_clusters_cc=="47"| RNA_data$sub.cluster_34 =="34_0"| RNA_data$sub.cluster_34 =="34_2"] <- "Goblet Cells"
+  RNA_data@meta.data$PreliminaryClusters[ RNA_data$sub.cluster_34 =="34_1"] <- "Paneth Cells"
+ 
+
+```
+
+
+```{r}
+Idents(RNA_data) <- "WNN_clusters_cc"
+cluster_44_all_cells <- WhichCells(RNA_data, idents = "44")
+RNA_data <- FindSubCluster(
+  RNA_data,
+  "44",
+  graph.name = "wsnn" ,
+  subcluster.name = "sub.cluster_44",
+  resolution = 0.03,
+  algorithm = 1
+)
+
+DimPlot(RNA_data, reduction = "wnn.umap_cc",   group.by = "sub.cluster_44", label.size = 3, label = TRUE, repel = TRUE, raster = FALSE, cells.highlight = cluster_44_all_cells)+ NoLegend()
+
+DimPlot(RNA_data, reduction = "wnn.umap_cc",   group.by = "sub.cluster_44", label.size = 3, label = TRUE, repel = TRUE, raster = FALSE, cells = cluster_44_all_cells)+ NoLegend()
+#Find which subcluster shows the paneth cell markers
+FeaturePlot(RNA_data,  reduction = "wnn.umap_cc", cells = cluster_44_all_cells, features = "Fcgr1")
+ VlnPlot(RNA_data, features = c("CD68"), pt.size = 0, group.by = "sub.cluster_44") + NoLegend() +  theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+            strip.background = element_rect(fill = "grey85", 
+                colour = "grey20"), axis.title.x = element_blank(),  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+ 
+ RNA_data@meta.data$PreliminaryClusters[RNA_data$sub.cluster_44=="44_1"| RNA_data$sub.cluster_44 =="44_2"| RNA_data$sub.cluster_44 =="44_3"] <- "cDC"
+  RNA_data@meta.data$PreliminaryClusters[ RNA_data$sub.cluster_44 =="44_0"] <- "Macrophages"
+ 
+
+```
+
+```{r}
+Idents(RNA_data) <- "PreliminaryClusters"
+monocytes <- WhichCells(RNA_data, idents = "Monocytes")
+RNA_data <- FindSubCluster(
+  RNA_data,
+  "Monocytes",
+  graph.name = "wsnn_cc" ,
+  subcluster.name = "Monocytes_subcluster",
+  resolution = 0.08,
+  algorithm = 1
+)
+
+DimPlot(RNA_data, reduction = "wnn.umap_cc",   group.by = "Monocytes_subcluster", label.size = 3, label = TRUE, repel = TRUE, raster = FALSE, cells.highlight = monocytes)+ NoLegend()
+
+DimPlot(RNA_data, reduction = "wnn.umap_cc",   group.by = "Monocytes_subcluster", label.size = 3, label = TRUE, repel = TRUE, raster = FALSE, cells = monocytes)+ NoLegend()
+#Find which subcluster shows the paneth cell markers
+FeaturePlot(RNA_data,  reduction = "wnn.umap_cc", cells = monocytes, features = "Ly6c2")
+
+ RNA_data@meta.data$PreliminaryClusters[RNA_data$Monocytes_subcluster=="Monocytes_0"] <- "Classical Mono"
+  RNA_data@meta.data$PreliminaryClusters[ RNA_data$Monocytes_subcluster =="Monocytes_1"] <- "Non classical Mono"
+ 
+
+```
+
+
+```{r}
+Idents(RNA_data) <- "PreliminaryClusters"
+cyclingT <- WhichCells(RNA_data, idents = "Cycling T cell")
+DimPlot(RNA_data, reduction = "wnn.umap_cc", group.by = "PreliminaryClusters", cells.highlight = cyclingT)
+#Clearly two populations of cycling T cells - CD8 and CD4
+FeaturePlot(RNA_data, reduction = "wnn.umap_cc", features = c("Cd8a", "Cd4"), cells = cyclingT)
+
+VlnPlot(RNA_data, features = c("Cd8a"), pt.size = 0, idents = c("50")) + NoLegend() +  theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+            strip.background = element_rect(fill = "grey85", 
+                colour = "grey20"), axis.title.x = element_blank(),  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+
+cd8pos <- WhichCells(RNA_data, idents = "50", expression = Cd8a >= 0.5)
+cd8neg <- WhichCells(RNA_data, idents = "50", expression = Cd8a < 0.5)
+
+ RNA_data@meta.data$PreliminaryClusters[colnames(RNA_data) %in% cd8pos] <- "Cycling CD8"
+  RNA_data@meta.data$PreliminaryClusters[colnames(RNA_data) %in% cd8neg] <- "Cycling CD4"
+
+
+```
+
+#Coarse Cell type generation
+```{r}
+unique(RNA_data$PreliminaryClusters)
+RNA_data@meta.data$CoarseCellType[RNA_data$PreliminaryClusters=="CD8 Activated" | RNA_data$PreliminaryClusters=="CD8 Naive" |RNA_data$PreliminaryClusters=="CD8 TCM"  |RNA_data$PreliminaryClusters=="Cycling CD8" | RNA_data$PreliminaryClusters=="CD8 TEM"] <- "CD8Tcells"
+RNA_data@meta.data$CoarseCellType[RNA_data$PreliminaryClusters=="CD4 TCM" | RNA_data$PreliminaryClusters=="Tregs" | RNA_data$PreliminaryClusters=="CD4 Naive" | RNA_data$PreliminaryClusters=="Cycling CD4" ] <- "CD4Tcells"
+RNA_data@meta.data$CoarseCellType[RNA_data$PreliminaryClusters=="B Cell" | RNA_data$PreliminaryClusters=="GC B Cells" | RNA_data$PreliminaryClusters=="IgA PCs"] <- "Bcells"
+RNA_data@meta.data$CoarseCellType[RNA_data$PreliminaryClusters=="cDC" | RNA_data$PreliminaryClusters=="Activated cDC"] <- "DCs"
+RNA_data@meta.data$CoarseCellType[RNA_data$PreliminaryClusters=="Fibroblasts"  ] <- "Fibroblasts"
+RNA_data@meta.data$CoarseCellType[RNA_data$PreliminaryClusters=="Singletons" ] <- "singletons"
+RNA_data@meta.data$CoarseCellType[RNA_data$PreliminaryClusters=="NK Cell"  | RNA_data$PreliminaryClusters=="ILC3" | RNA_data$PreliminaryClusters=="ILC2"] <- "ILCs"
+RNA_data@meta.data$CoarseCellType[RNA_data$PreliminaryClusters=="pDC" ] <- "pDC"
+RNA_data@meta.data$CoarseCellType[RNA_data$PreliminaryClusters=="gdT cell"  | RNA_data$PreliminaryClusters=="CD8 Proliferating"] <- "gdTCells"
+RNA_data@meta.data$CoarseCellType[RNA_data$PreliminaryClusters=="Macrophages" | RNA_data$PreliminaryClusters=="Non classical Mono" | RNA_data$PreliminaryClusters=="Classical Mono"] <- "Mono_Mac"
+RNA_data@meta.data$CoarseCellType[RNA_data$PreliminaryClusters=="CD4 NKT" ] <- "CD4_NKT"
+RNA_data@meta.data$CoarseCellType[RNA_data$PreliminaryClusters=="Erythrocytes" ] <- "Erythrocytes"
+RNA_data@meta.data$CoarseCellType[RNA_data$PreliminaryClusters=="Neutrophils" ] <- "Neutrophils"
+RNA_data@meta.data$CoarseCellType[RNA_data$PreliminaryClusters=="Enterocyte" ] <- "Enterocyte"
+RNA_data@meta.data$CoarseCellType[RNA_data$PreliminaryClusters=="Goblet Cells"  ] <- "Goblet"
+
+RNA_data@meta.data$CoarseCellType[RNA_data$PreliminaryClusters=="SC_TA" ] <- "SC_TA"
+RNA_data@meta.data$CoarseCellType[RNA_data$PreliminaryClusters=="Endothelial LEC" ] <- "LEC"
+RNA_data@meta.data$CoarseCellType[RNA_data$PreliminaryClusters=="Stromal Cell"] <- "StromalCell"
+RNA_data@meta.data$CoarseCellType[RNA_data$PreliminaryClusters=="Endothelial BEC" ] <- "BEC"
+RNA_data@meta.data$CoarseCellType[RNA_data$PreliminaryClusters=="Paneth Cells"] <- "Paneth"
+RNA_data@meta.data$CoarseCellType[RNA_data$PreliminaryClusters=="Tuft Cells" ] <- "TuftCell"
+RNA_data@meta.data$CoarseCellType[RNA_data$PreliminaryClusters=="EEC"] <- "EEC"
+unique(RNA_data$CoarseCellType)
+
+```
+
+##Run Tilted CCA - What components of ADT data might be useful for clustering 
+#Rerun Tilted CCA after regressing out cellcycle components the tilted CCA results to the seurat object using the cellcycle regressed umap
+```{r}
+
+
+
+set.seed(10)
+RNA_data[["common_tcca"]] <- tiltedCCA::create_SeuratDim(input_obj = multiSVD_obj,
+                                                   what = "common",
+                                                   aligned_umap_assay = "wnn.umap_cc",
+                                                   seurat_obj = RNA_data,
+                                                   seurat_assay = "RNA",
+                                                   verbose = 1)
+set.seed(10)
+RNA_data[["distinct1_tcca"]] <- tiltedCCA::create_SeuratDim(input_obj = multiSVD_obj,
+                                                      what = "distinct_1",
+                                                      aligned_umap_assay = "wnn.umap_cc",
+                                                      seurat_obj = RNA_data,
+                                                      seurat_assay = "RNA",
+                                                      verbose = 1)
+set.seed(10)
+RNA_data[["distinct2_tcca"]] <- tiltedCCA::create_SeuratDim(input_obj = multiSVD_obj,
+                                                      what = "distinct_2",
+                                                      aligned_umap_assay = "wnn.umap_cc",
+                                                      seurat_obj = RNA_data,
+                                                      seurat_assay = "RNA",
+                                                      verbose = 1)
+```
+
+```{r}
+#Visualize the tiltedCCA results
+p1 <- Seurat::DimPlot(RNA_data, 
+                      reduction = "common_tcca",
+                      group.by = "PreliminaryClusters", 
+                      #cols = col_palette, 
+                      label = T, repel = T, label.size = 2.5)
+p1 <- p1 + Seurat::NoLegend()
+p1 <- p1 + ggplot2::ggtitle("Common") + ggplot2::labs(x = "", y = "")
+p1 <- p1 + ggplot2::theme(legend.text = ggplot2::element_text(size = 5))
+
+p2 <- Seurat::DimPlot(RNA_data, 
+                      reduction = "distinct1_tcca",
+                      group.by = "PreliminaryClusters", 
+                      #cols = col_palette, 
+                      label = T, repel = T, label.size = 2.5)
+p2 <- p2 + Seurat::NoLegend()
+p2 <- p2 + ggplot2::ggtitle("RNA Distinct") + ggplot2::labs(x = "", y = "")
+p2 <- p2 + ggplot2::theme(legend.text = ggplot2::element_text(size = 5))
+
+p3 <- Seurat::DimPlot(RNA_data, 
+                      reduction = "distinct2_tcca",
+                      group.by = "PreliminaryClusters", 
+                      #cols = col_palette, 
+                      label = T, repel = T, label.size = 2.5)
+p3 <- p3 + Seurat::NoLegend()
+p3 <- p3 + ggplot2::ggtitle("ADT Distinct") + ggplot2::labs(x = "", y = "")
+p3 <- p3 + ggplot2::theme(legend.text = ggplot2::element_text(size = 5))
+ 
+p1 | p2 | p3
+
+```
+
+```{r}
+membership_vec <- factor(RNA_data$PreliminaryClusters)
+cell_enrichment_res <- tiltedCCA::postprocess_cell_enrichment(
+  input_obj = multiSVD_obj, 
+  membership_vec = membership_vec, 
+  max_subsample = 1000,
+  verbose = 1)
+unique(membership_vec) #Tells us how many colors we need
+library(Polychrome)
+P35 = createPalette(35,  c("#ff0000", "#00ff00", "#0000ff"))
+swatch(P35)
+
+tiltedCCA::plot_cell_enrichment(cell_enrichment_res,
+                                col_palette = P35,
+                                cex_axis = 1.25,
+                                cex_lab = 1.5,
+                                xlab_1 = "RNA Distinct",
+                                xlab_2 = "ADT Distinct")
+
+
+enrichment_data <- as.data.frame(cell_enrichment_res$enrichment_distinct_1$df)
+enrichment_data$common <- cell_enrichment_res$enrichment_common$df$value
+enrichment_data$adt <-cell_enrichment_res$enrichment_distinct_2$df$value
+colnames(enrichment_data)[1:5] <- c("cellType", "rna_value", "sd_rna", "common_value", "adt_value")
+# Can we make plots for the two modes 
+library(ggrepel)
+ggplot(enrichment_data, aes(x=rna_value, y=common_value)  ) +
+  geom_point(  aes(color = cellType), shape = 16, size = 4) + 
+  geom_text_repel(aes(label = cellType), box.padding = unit(1, 'lines')) +
+  ggtitle("RNA cluster enrichment") + 
+  geom_abline(intercept = 0, slope = 1) +
+  xlim(0,1) + ylim(-0,1) +
+  theme_bw() + theme(legend.position = "none")
+
+  
+  ggsave("RNA_cluster_tCCA_againstCommon.png",
+  plot = last_plot(), device = NULL, path = out,
+  scale = 1, width = 6,height = 6, units = c("in"), dpi = 600, limitsize = TRUE, bg = NULL)
+unique(enrichment_data$cellType)
+
+ggplot(enrichment_data, aes(x=adt_value, y=common_value)  ) +
+  geom_point(  aes(color = cellType), shape = 16, size = 4) + 
+  geom_text_repel(aes(label = cellType), box.padding = unit(1, 'lines')) +
+  ggtitle("ADT cluster enrichment") + 
+ geom_abline(intercept = 0, slope = 1) +
+  xlim(0,1) + ylim(-0,1) +
+  theme_bw() + theme(legend.position = "none")
+
+  ggsave("ADT_cluster_tCCA_againstCommon.png",
+  plot = last_plot(), device = NULL, path = out,
+  scale = 1, width = 6,height = 6, units = c("in"), dpi = 600, limitsize = TRUE, bg = NULL)
+unique(enrichment_data$cellType)
+
+enrichment_data2 <- as.data.frame(cbind(enrichment_data$cellType, enrichment_data$rna_value, enrichment_data$adt_value, enrichment_data$common_value))
+colnames(enrichment_data2) <- c("cellType", "rna_value", "adt_value", "common")
+melted <- reshape2::melt(enrichment_data2, id = "cellType")
+melted$value <- as.numeric(melted$value)
+ Enrichments <-  melted  %>%
+ggplot( aes(cellType, value, fill = factor(variable))) + 
+   geom_col(aes(fill = variable), position = position_dodge2(preserve = "single")) +  scale_fill_manual(values=c("#0500a1", "#f2b713", "#3eb00d")) + ylab("Component Enrichment T-CCA") +
+    theme(panel.background = element_rect(fill = "white", colour = NA), 
+          panel.border = element_blank(), panel.grid = element_line(colour = "grey92"), 
+          axis.title.x = element_blank(), legend.title = element_blank(),
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+            strip.background = element_rect(fill = "grey85", 
+                colour = "grey20"), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+  Enrichments
+  
+  ggsave("Cluster_t_cca_enrichments_barchart.png",
+  plot = last_plot(), device = NULL, path = out,
+  scale = 1, width = 7,height = 5, units = c("in"), dpi = 600, limitsize = TRUE, bg = NULL)
+  
+
+```
+
+```{r}
+#Are any of the Proteins important and where
+celltype <- as.character(RNA_data$PreliminaryClusters)
+
+DefaultAssay(RNA_data) <- "ADT"
+VariableFeatures(RNA_data, assay = "ADT") <- Features(RNA_data, assay = "ADT") #Set variable features for the ADT data
+
+#The below looks for slow var.features
+ADT_only <- RNA_data[["ADT"]]
+ADT_only <- CreateSeuratObject(ADT_only, assay = "ADT")
+ADT_only$celltype <- celltype
+ADT_only[["ADT"]] <- as(ADT_only[["ADT"]], "Assay")
+ADT_only[["PreliminaryClusters"]] <- RNA_data$PreliminaryClusters
+Idents(ADT_only) <- "PrelimaryClusters"
+proteins_de_list <- tiltedCCA::differential_expression(seurat_obj = ADT_only,
+                                                   assay = "ADT",
+                                                   idents = "PreliminaryClusters",
+                                                   test_use = "wilcox",
+                                                   slot = "data")
+
+
+logpval_vec <- tiltedCCA::postprocess_depvalue(de_list = proteins_de_list)
+
+rsquare_vec <- tiltedCCA::postprocess_modality_alignment(input_obj = multiSVD_obj,
+                                              bool_use_denoised = T,
+                                              seurat_obj = ADT_data,
+                                              input_assay = 2,
+                                              seurat_assay = "ADT",
+                                              seurat_slot = "data")
+
+
+col_palette_enrichment <- paste0(grDevices::colorRampPalette(c('lightgrey', 'blue'))(100), "33")
+gene_breaks <- seq(0, 0.18, length.out = 100)
+gene_depth <- Matrix::rowSums(ADT_only[["ADT"]]@counts[names(rsquare_vec),])/n
+gene_depth <- log10(gene_depth+1)
+gene_color <- sapply(gene_depth, function(x){
+  col_palette_enrichment[which.min(abs(gene_breaks - x))]
+})
+ord_idx <- order(gene_depth, decreasing = F)
+logpval_vec
+
+protein_list <- tiltedCCA::postprocess_marker_variables(proteins_de_list, 
+  log_thres = 5,
+  num_quantile_threshold = 0.6)
+#This loop will plot a chart for every cell type. The way to read the chart is as follows. Dots that have a "color" are identified as expressed in that cell type and are "markers" for that cell type. The Y axis is how well that markers expression aligns with the common/combined data. The X axis is the significance to which that marker is differentially expressed across the data set. Therefore - All of the Proteins which are in he upper right corner represent proteins that demonstrate DE but that are redundant to the RNA data provided. Any dots in the lower right side would represent higher differentially present/expressed proteins that represent unique information not shared with the RNA modality. There are no proteins which fall into this category which suggests that they are either - uninformative or not unique to the ADT data
+for(i in 1:35){
+  tiltedCCA::plot_alignment(rsquare_vec = rsquare_vec,
+                 logpval_vec = logpval_vec,
+                 main = paste0("CITEseq - MIST\n", names(protein_list)[i], " ADT"),
+                 col_gene_highlight = P35[[i]],
+                 gene_names = protein_list[[i]],
+                 lwd_polygon_bold = 3)
+}
+
+#Shows all genes where genes are colored by sequencing depth
+
+tiltedCCA::plot_alignment(rsquare_vec = rsquare_vec[ord_idx],
+               logpval_vec = logpval_vec[ord_idx],
+               main = "I dunno",
+               bool_mark_ymedian = T,
+               col_gene_highlight_border = rgb(255, 205, 87, 255*0.5, maxColorValue = 255),
+               col_points = gene_color[ord_idx],
+               mark_median_xthres = 10,
+               lwd_polygon_bold = 3)
+
+#In theory, this data could be used to identify the least useful and most useful genes. 
+#Proteins with a low X axis score are not useful. 
+logpval_vec #This reads out all th e
+logpval_vec.df <- as.data.frame(logpval_vec)
+logpval_vec.df$Gene <- rownames(logpval_vec.df)
+
+ Marker_Utility <-  logpval_vec.df %>%
+   mutate(Gene = fct_reorder(Gene,  dplyr::desc(logpval_vec))) %>%
+ggplot( aes(Gene, logpval_vec, )) + 
+   geom_bar(stat="identity", width=.5, position = "dodge") +  
+     #scale_fill_manual(values=c("#0500a1", "#f2b713", "#d95327"), breaks = c("Naive", "Cryptosporidium", "Yersinia")) +
+    theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+            strip.background = element_rect(fill = "grey85", 
+                colour = "grey20"), axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=1)) 
+  Marker_Utility
+    ggsave("DE_Score_Proteins_CCA.png",
+  plot = last_plot(), device = NULL, path = out,
+  scale = 1, width = 12,height = 5, units = c("in"), dpi = 600, limitsize = TRUE, bg = NULL)
+
+```
+
+#Fix the metadata Column "Mouse" and Create a "Cell type x Infection" Metadata column -
+```{r}
+unique(RNA_data@meta.data$orig.ident)
+RNA_data@meta.data$Mouse[RNA_data$orig.ident %like% "CHMI24134"] <- "CHMI24134"
+RNA_data@meta.data$Mouse[RNA_data$orig.ident %like% "CHMI2493"] <- "CHMI2493"
+RNA_data@meta.data$Mouse[RNA_data$orig.ident %like% "CHMI2482"] <- "CHMI2482"
+RNA_data@meta.data$Mouse[RNA_data$orig.ident %like% "CHMI2489"] <- "CHMI2489"
+RNA_data@meta.data$Mouse[RNA_data$orig.ident %like% "CHMI24109"] <- "CHMI24109"
+RNA_data@meta.data$Mouse[RNA_data$orig.ident %like% "CHMI24142"] <- "CHMI24142"
+#check the values - it is fixed
+unique(RNA_data@meta.data$Mouse)
+```
+
+```{r}
+#Add a new metadata column which reflects the mouse/infection/cell type - This could be used for future pseudobulk comparisons
+
+DefaultAssay(RNA_data) <- "RNA"
+RNA_data$celltype.condition.sample <- paste(RNA_data$PreliminaryClusters, RNA_data$InfectionStatus, RNA_data$Mouse, sep="_")
+RNA_data$celltype.condition <- paste(RNA_data$PreliminaryClusters, RNA_data$InfectionStatus, sep="_")
+#The below is an iterative way to look for DEG in each cluster across infections
+
+Idents(RNA_data) <- "celltype.condition"
+ unique(RNA_data$celltype.condition) # how many loops
+  unique(RNA_data$InfectionStatus) # names to append
+  cluster_names <- unique(RNA_data$PreliminaryClusters) 
+for (i in cluster_names){ #or however many clusters you have
+try({
+ident1 <- paste0(i,"_Yersinia")
+ident2 <- paste0(i,"_Naive")
+condition.diffgenes <- FindMarkers(RNA_data, ident.1 = ident1, ident.2=ident2, min.pct=0.25, logfc.threshold=0.25)
+write.csv(condition.diffgenes, file=paste0(out,"/DEG/",i,"_yers_naive.csv"))
+})
+}
+  
+ for (i in cluster_names){ 
+   try({
+ident1 <- paste0(i,"_Cryptosporidium")
+ident2 <- paste0(i,"_Naive")
+condition.diffgenes <- FindMarkers(RNA_data, ident.1 = ident1, ident.2=ident2, min.pct=0.25, logfc.threshold=0.25)
+write.csv(condition.diffgenes, file=paste0(out,"/DEG/",i,"_crypto_naive.csv"))
+})
+}
+
+
+```
+
+
+```{r}
+# create a sort of loop to examine the differential gene output from above 
+yersinia <- list()
+crypto <- list()
+#I will need to read in the appropriate files
+ for (i in cluster_names){ 
+yersinia[[i]] <- read.csv( file=paste0(out,"/DEG/",i,"_yers_naive.csv"))
+crypto[[i]]<- read.csv( file=paste0(out,"/DEG/",i,"_crypto_naive.csv"))
+}
+
+DEG_list <- list()
+# For Each matching pair I want to combine the data and create a new variable for differences 
+ for (i in cluster_names){ 
+DEG_list[[i]] <- 
+}
+
+
+```
+#Split UMAPs by cells in different Tissues
+```{r}
+Idents(RNA_data) <- "Tissue"
+
+MLN_cells <- WhichCells(RNA_data, idents = "Mesenteric Lymph Node")
+LP_cells <- WhichCells(RNA_data, idents = "Lamina Propria")
+IEL_cells <- WhichCells(RNA_data, idents = "Intra-Epithelial Lymphocytes")
+
+table(RNA_data@meta.data$InfectionStatus, RNA_data@meta.data$orig.ident)
+DimPlot(RNA_data, reduction = "wnn.umap_cc",   group.by = "WNN_clusters_cc", split.by = "InfectionStatus", cells = MLN_cells,
+        combine = FALSE, label.size = 2.5, label = TRUE) 
+DimPlot(RNA_data, reduction = "wnn.umap_cc",   group.by = "WNN_clusters_cc", cells = LP_cells,
+  combine = FALSE, label.size = 2.5, label = TRUE) 
+DimPlot(RNA_data, reduction = "wnn.umap_cc",   group.by = "WNN_clusters_cc", cells = MLN_cells,
+  combine = FALSE, label.size = 2.5, label = TRUE)
+DimPlot(RNA_data, reduction = "wnn.umap_cc",   group.by = "WNN_clusters_cc", cells = IEL_cells,
+  combine = FALSE, label.size = 2.5, label = TRUE)
+DimPlot(RNA_data, reduction = "wnn.umap_cc",   group.by = "SingleR.labels.wnn",
+  combine = TRUE, label.size = 2.5, label = TRUE) + NoLegend()
+DimPlot(RNA_data, reduction = "wnn.umap_cc",   group.by = "PreliminaryClusters",
+  combine = TRUE, label.size = 2.5, label = TRUE)
+
+```
+
+#Graphs for Dan
+```{r}
+
+Idents(RNA_data) <- "PreliminaryClusters"
+WNN_plot<- DimPlot(RNA_data, reduction = "wnn.umap",   group.by = "PreliminaryClusters",
+  combine = TRUE, label.size = 2.5, label = TRUE, repel = TRUE, raster = F) + NoLegend()
+  WNN_plot
+  
+   ggsave(
+  "PreliminaryClusters_Umap_20240528.png",
+  plot = last_plot() ,
+  device = NULL,
+  path = out,
+  scale = 1,
+  width = 6,
+  height = 6,
+  units = c("in"),
+  dpi = 600,
+  limitsize = TRUE,
+  bg = NULL)
+
+  setwd(out)
+  png(file = "WNN_UMAP_Labeled_allTissues.png", width = 4000, height =4000, units = "px", res = 600)
+  WNN_plot +ggtitle("Combined UMAP")
+dev.off()
+
+#MLN
+
+  png(file = "WNN_UMAP_Labeled_MLN.png", width = 4000, height =4000, units = "px", res = 600)
+DimPlot(RNA_data, reduction = "wnn.umap",   group.by = "PreliminaryClusters", cells = MLN_cells,
+  combine = TRUE, label.size = 3, label = TRUE) + NoLegend()  +ggtitle("Mesenteric Lymph Node")
+dev.off()
+
+#LP
+
+  png(file = "WNN_UMAP_Labeled_LP.png", width = 4000, height =4000, units = "px", res = 600)
+DimPlot(RNA_data, reduction = "wnn.umap",   group.by = "PreliminaryClusters", cells = LP_cells,
+  combine = TRUE, label.size = 3, label = TRUE) + NoLegend() +ggtitle("Lamina Propria")
+  dev.off()
+
+
+#IEL  -MLN CD4 T cells label was mapping in the middle of nowhere (cells absent)
+png(file = "WNN_UMAP_Labeled_IEL.png", width = 4000, height =4000, units = "px", res = 600)
+DimPlot(RNA_data, reduction = "wnn.umap",   group.by = "PreliminaryClusters", cells = IEL_cells,
+  combine = TRUE, label.size = 3, label = TRUE) + NoLegend() +ggtitle("Intra-epithelial Cells")
+  dev.off()
+
+   
+  ggsave(file="WNN_UMAP_Labeled_IEL.svg", plot=IEL_plot, width=8, height=8)
+  dev.off()
+  
+  setwd(out)
+png(file = "WNN_UMAP__combined_Clusters.png", width = 4000, height =4000, units = "px", res = 600)
+  DimPlot(RNA_data, reduction = "wnn.umap",   group.by = c("WNN_clusters"),
+  combine = TRUE, label.size = 3.5, label = TRUE)  + NoLegend() + ggtitle("RNA and Protein Clusters")
+
+  dev.off()
+  
+
+  
+    DefaultAssay(RNA_data) <- "ADT"
+  png(file = "WNN_UMAP_KLRG1_protein_expression.png", width = 4000, height =4000, units = "px", res = 600)
+FeaturePlot(RNA_data, reduction = "wnn.umap",features = c("KLRG1"))
+dev.off()
+
+
+#
+
+
+
+  png(file = "WNN_UMAP_Crypto_cells.png", width = 4000, height =4000, units = "px", res = 600)
+crypto <- DimPlot(RNA_data, reduction = "wnn.umap",   group.by = "PreliminaryClusters", cells = Crypto_cells,
+  combine = TRUE, label.size = 3, label = TRUE) + NoLegend() + ggtitle ("Cryptosporidium")
+  dev.off()
+
+  
+```
+
+#Examine Disease effects on Cell populations
+```{r}
+# For each sample, determine the number of  cells in each cluster
+cluster_counts <-  table(RNA_data@meta.data$PreliminaryClusters, RNA_data@meta.data$orig.ident)
+cluster_counts <- as.data.frame(cluster_counts)
+cluster_counts <-reshape2::dcast(cluster_counts, formula = Var1 ~ Var2)
+
+rownames(cluster_counts) <- cluster_counts$Var1
+cluster_counts <- cluster_counts[,2:ncol(cluster_counts)]
+cluster_prop <- mutate(cluster_counts, across(everything(), ~.x/sum(.x)*100))
+colSums(cluster_prop) # should be 100
+cluster_prop$Cluster <- rownames(cluster_counts)
+
+cluster_prop <- melt(cluster_prop, id = "Cluster")
+colnames(cluster_prop) <- c("Cluster", "Sample", "Frequency")
+cluster_prop$Tissue <- as.character(cluster_prop$Sample)
+cluster_prop$Tissue[cluster_prop$Sample %like% "MLN"] <- "MLN"
+cluster_prop$Tissue[cluster_prop$Sample %like% "IEL"] <- "IEL"
+cluster_prop$Tissue[cluster_prop$Sample %like% "LP"] <- "LP"
+
+cluster_prop$Infection[cluster_prop$Sample %like% "CHMI2482" | cluster_prop$Sample %like% "CHMI24109"] <- "Naive"
+cluster_prop$Infection[cluster_prop$Sample %like% "CHMI2489" | cluster_prop$Sample %like% "CHMI2493"] <- "Cryptosporidium"
+cluster_prop$Infection[cluster_prop$Sample %like% "CHMI24134" | cluster_prop$Sample %like% "CHMI24142"] <- "Yersinia"
+
+cluster_prop$sampleXInfection <- paste(cluster_prop$Sample, cluster_prop$Infection, sep="_")
+
+
+cluster_prop[order(cluster_prop$Tissue),]
+ggplot(cluster_prop, aes(Frequency, Sample)) +
+  geom_col(aes(fill = Cluster)) + scale_color_continuous() + facet_wrap(~Tissue)
+
+cluster_prop_AllTissue <- cluster_prop
+cluster_prop_AllTissue$Infection <- factor(cluster_prop$Infection, levels =c("Naive", "Cryptosporidium", "Yersinia"))
+cluster_prop_AllTissue$sampleXInfection <- factor(cluster_prop$Infection, levels =c("Naive", "Cryptosporidium", "Yersinia"))
+ All_Frequencies <-  cluster_prop_AllTissue %>%
+   mutate(Cluster = fct_reorder(Cluster,  dplyr::desc(Frequency))) %>%
+ggplot( aes(Cluster, Frequency, fill = Infection)) + 
+   geom_bar(stat="identity", width=.5, position = "dodge") +  scale_fill_manual(values=c("#0500a1", "#f2b713", "#d95327"), breaks = c("Naive", "Cryptosporidium", "Yersinia")) +
+    theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+            strip.background = element_rect(fill = "grey85", 
+                colour = "grey20"), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+  All_Frequencies
+  All_Frequencies  + facet_zoom(ylim = c(0, 5))
+  
+
+unique(cluster_prop_LP$sampleXInfection)
+
+cluster_prop_MLN <- cluster_prop[cluster_prop$Tissue == "MLN",]
+cluster_prop_MLN$Infection <- factor(cluster_prop_MLN$Infection, levels =c("Naive", "Cryptosporidium", "Yersinia"))
+cluster_prop_MLN$sampleXInfection <- factor(cluster_prop_MLN$sampleXInfection, levels =c("CHMI24109_MLN_Naive", "CHMI2482_MLN_Naive", "CHMI2489_MLN_Cryptosporidium", "CHMI2493_MLN_Cryptosporidium", "CHMI24142_MLN_Yersinia", "CHMI24134_MLN_Yersinia"))
+ MLN_Frequencies <-  cluster_prop_MLN %>%
+   mutate(Cluster = fct_reorder(Cluster,  dplyr::desc(Frequency)))  %>%
+ggplot( aes(Cluster, Frequency, fill = sampleXInfection)) + 
+   geom_bar(stat="identity", width=.8, position = "dodge") +  scale_fill_manual(values=c("#0500a1","#0500a1", "#f2b713","#f2b713", "#d95327", "#d95327"), breaks = c("CHMI24109_MLN_Naive", "CHMI2482_MLN_Naive", "CHMI2489_MLN_Cryptosporidium", "CHMI2493_MLN_Cryptosporidium", "CHMI24142_MLN_Yersinia", "CHMI24134_MLN_Yersinia")) +
+    theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+          legend.position = "bottom",
+            strip.background = element_rect(fill = "grey85", 
+                colour = "grey20"), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+  MLN_Frequencies  + ggtitle("MLN")
+  MLN_Frequencies  + ggtitle("MLN") + facet_zoom(ylim = c(0, 5))
+  
+  
+  cluster_prop_LP <- cluster_prop[cluster_prop$Tissue == "LP",]
+cluster_prop_LP$Infection <- factor(cluster_prop_LP$Infection, levels =c("Naive", "Cryptosporidium", "Yersinia"))
+cluster_prop_LP$sampleXInfection <- factor(cluster_prop_LP$sampleXInfection, levels =c("CHMI24109_LP_Naive", "CHMI2482_LP_Naive", "CHMI2489_LP_Cryptosporidium", "CHMI2493_LP_Cryptosporidium", "CHMI24142_LP_Yersinia", "CHMI24134_LP_Yersinia"))
+ LP_Frequencies <-  cluster_prop_LP %>%
+   mutate(Cluster = fct_reorder(Cluster, dplyr::desc(Frequency)))  %>%
+ggplot( aes(Cluster, Frequency, fill = sampleXInfection)) + 
+   geom_bar(stat="identity", width=.8, position = "dodge")+  scale_fill_manual(values=c("#0500a1","#0500a1", "#f2b713","#f2b713", "#d95327", "#d95327"), breaks = c("CHMI24109_LP_Naive", "CHMI2482_LP_Naive", "CHMI2489_LP_Cryptosporidium", "CHMI2493_LP_Cryptosporidium", "CHMI24142_LP_Yersinia", "CHMI24134_LP_Yersinia")) +
+    theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+          legend.position = "bottom",
+            strip.background = element_rect(fill = "grey85", 
+                colour = "grey20"), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+  LP_Frequencies + ggtitle("Lamina Propria")
+  LP_Frequencies  + ggtitle("Lamina Propria") + facet_zoom(ylim = c(0, 5))
+  
+  
+  unique(cluster_prop_IEL$sampleXInfection)
+cluster_prop_IEL <- cluster_prop[cluster_prop$Tissue == "IEL",]
+cluster_prop_IEL$Infection <- factor(cluster_prop_IEL$Infection, levels =c("Naive", "Cryptosporidium", "Yersinia"))
+cluster_prop_IEL$sampleXInfection <- factor(cluster_prop_IEL$sampleXInfection, levels =c("CHMI24109_IEL_Naive", "CHMI2482_IEL_Naive", "CHMI2489_IEL_Cryptosporidium",  "CHMI24142_IEL_Yersinia", "CHMI24134_IEL_Yersinia"))
+ IEL_Frequencies <-  cluster_prop_IEL %>%
+   mutate(Cluster = fct_reorder(Cluster, dplyr::desc(Frequency)))  %>%
+ggplot( aes(Cluster, Frequency, fill = sampleXInfection)) + 
+   geom_bar(stat="identity", width=.8, position = "dodge") +  scale_fill_manual(values=c("#0500a1","#0500a1", "#f2b713", "#d95327", "#d95327"), breaks = c("CHMI24109_IEL_Naive", "CHMI2482_IEL_Naive", "CHMI2489_IEL_Cryptosporidium",  "CHMI24142_IEL_Yersinia", "CHMI24134_IEL_Yersinia")) +
+    theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+          legend.position = "bottom",
+            strip.background = element_rect(fill = "grey85", 
+                colour = "grey20"), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+  IEL_Frequencies + ggtitle("IEL")
+  IEL_Frequencies  + ggtitle("IEL") + facet_zoom(ylim = c(0, 5))
+  
+   setwd(out)
+  png(file = "Celltype_freq_MLN.png", width = 6000, height =4000, units = "px", res = 600)
+  MLN_Frequencies +ggtitle("Mesenteric LN")
+dev.off()
+    png(file = "Celltype_freq_LP.png", width = 6000, height =4000, units = "px", res = 600)
+  LP_Frequencies +ggtitle("Lamina Propria")
+dev.off()
+ png(file = "Celltype_freq_IEL.png", width = 6000, height =4000, units = "px", res = 600)
+  LP_Frequencies +ggtitle("Intra-epithelial Lymphocytes")
+dev.off()
+
+  png(file = "Celltype_freq_MLN_zoomed.png", width = 6000, height =4000, units = "px", res = 600)
+  MLN_Frequencies +ggtitle("Mesenteric LN") +facet_zoom(ylim = c(0, 5))
+dev.off()
+    png(file = "Celltype_freq_LP_zoomed.png", width = 6000, height =4000, units = "px", res = 600)
+  LP_Frequencies +ggtitle("Lamina Propria")+facet_zoom(ylim = c(0, 5))
+dev.off()
+ png(file = "Celltype_freq_IEL_zoomed.png", width = 6000, height =4000, units = "px", res = 600)
+  IEL_Frequencies +ggtitle("Intra-epithelial Lymphocytes")+facet_zoom(ylim = c(0, 5))
+dev.off()
+
+```
+
+
+#Save plots showing RNA determined clusters and WNN determined clusters for comparison of resolution
+```{r}
+
+DimPlot(RNA_data, reduction = "umap.rpca",   group.by = c("rpca_integration_clusters", "PreliminaryClusters"),
+  combine = FALSE, label.size = 2, label = TRUE) 
+Idents(RNA_data) <- "PreliminaryClusters"
+DimPlot(RNA_data, reduction = "wnn.umap",  group.by = c("PreliminaryClusters",  "WNN_clusters", "rpca_integration_clusters"),
+  combine = FALSE, label.size = 2, label = TRUE) 
+Idents(RNA_data) <- "PreliminaryClusters"
+RNA_plot <- DimPlot(RNA_data, reduction = "wnn.umap", group.by = "rpca_integration_clusters",
+  combine = TRUE, label.size = 3.5, label = TRUE) + NoLegend()
+WNN_plot <- DimPlot(RNA_data, reduction = "wnn.umap", group.by = "WNN_clusters",
+  combine = TRUE, label.size = 3.5, label = TRUE) + NoLegend()
+  
+ setwd(out)
+  png(file = "RNA_Based_UMAP_clusts.png", width = 4000, height =4000, units = "px", res = 600)
+  RNA_plot +ggtitle("RNA Alone")
+dev.off()
+    png(file = "Combined_RNA_ADT_UMAP_clusts.png", width = 4000, height =4000, units = "px", res = 600)
+  WNN_plot +ggtitle("Combined RNA and Protein")
+dev.off()
+table(RNA_data$WNN_clusters2)
+
+ setwd(out)
+  ggsave(file="Combined_RNA_ADT_UMAP_clusts.svg", plot=WNN_plot, width=8, height=8)
+
+```
+
+```{r}
+WNN2_adt_markers[WNN2_adt_markers$cluster==28 & WNN2_adt_markers$avg_log2FC >1,]
+
+```
+
+#Look at expression vs protein level info
+```{r}
+##After Frustration - I discovered that somehwere in this mess, seurat renamed my genes wih protein names "Cd4" does nont work for CD4 Gene is mouse
+DefaultAssay(RNA_data) <- "RNA"
+Idents(RNA_data) <- "WNN_clusters"
+FeaturePlot(RNA_data, reduction = "wnn.umap",features = c("KLRB1"))
+FeaturePlot(RNA_data, reduction = "wnn.umap",features = c("CD4"))
+DefaultAssay(RNA_data) <- "ADT"
+FeaturePlot(RNA_data, reduction = "wnn.umap",features = c("NK-1.1"))
+
+FeaturePlot(RNA_data, reduction = "wnn.umap",features = c("CD4"))
+FeaturePlot(RNA_data, reduction = "wnn.umap",features = c("KLRG1(MAFA)"))
+
+ setwd(out)
+  png(file = "UMAP_Feature_KLRG1_protein.png", width = 4000, height =4000, units = "px", res = 600)
+ FeaturePlot(RNA_data, reduction = "wnn.umap",features = c("KLRG1")) + scale_colour_gradientn(colours = brewer.pal(n = 11, name = "Blues"))
+dev.off()
+
+DefaultAssay(RNA_data) <- "RNA"
+ setwd(out)
+  png(file = "Vln_Feature_KLRG1_RNA.png", width = 4000, height =4000, units = "px", res = 600)
+ VlnPlot(RNA_data, features = c("KLRG1"), pt.size = 0, group.by = "PreliminaryClusters") + NoLegend() +  theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+            strip.background = element_rect(fill = "grey85", 
+                colour = "grey20"), axis.title.x = element_blank(),  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+dev.off()
+
+
+rownames(RNA_data[["ADT"]])
+
+ setwd(out)
+   png(file = "Genes_per_cell_QC.png", width = 7000, height =4000, units = "px", res = 600)
+VlnPlot(RNA_data, features = c("nFeature_RNA"), group.by = "orig.ident", raster = FALSE, pt.size = 0.0) + NoLegend() + ggtitle("Genes/Cell") +theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+            strip.background = element_rect(fill = "grey85", 
+                colour = "grey20"), axis.title.x = element_blank(),  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+dev.off()
+```
+
+#Save Umaps Separated by Disease - create condition metadata (tissueXInfection)
+I will save plots using the total cell populations as well as downsampling appropriately to reflect difference that are not driven by total cell number
+```{r}
+#Create a new variable which combined the Infection status and Tissue type
+
+RNA_data@meta.data$condition[RNA_data$orig.ident %like% "CHMI2482_MLN" | RNA_data$orig.ident %like% "CHMI24109_MLN"] <- "MLN_Naive"
+RNA_data@meta.data$condition[RNA_data$orig.ident %like% "CHMI2482_LP" | RNA_data$orig.ident %like% "CHMI24109_LP"] <- "LP_Naive"
+RNA_data@meta.data$condition[RNA_data$orig.ident %like% "CHMI2482_IEL" | RNA_data$orig.ident%like% "CHMI24109_IEL"] <- "IEL_Naive"
+
+RNA_data@meta.data$condition[RNA_data$orig.ident %like% "CHMI2489_MLN" | RNA_data$orig.ident %like% "CHMI2493_MLN"] <- "MLN_Crypto"
+RNA_data@meta.data$condition[RNA_data$orig.ident %like% "CHMI2489_LP" | RNA_data$orig.ident %like% "CHMI2493_LP"] <- "LP_Crypto"
+RNA_data@meta.data$condition[RNA_data$orig.ident %like% "CHMI2489_IEL"] <- "IEL_Crypto"
+
+RNA_data@meta.data$condition[RNA_data$orig.ident %like% "CHMI24134_MLN" | RNA_data$orig.ident %like% "CHMI24142_MLN" ] <- "MLN_Yersinia"
+RNA_data@meta.data$condition[RNA_data$orig.ident %like% "CHMI24134_LP" |RNA_data$orig.ident %like% "CHMI24142_LP"  ] <- "LP_Yersinia"
+RNA_data@meta.data$condition[RNA_data$orig.ident %like% "CHMI24134_IEL" |RNA_data$orig.ident %like% "CHMI24142_IEL" ] <- "IEL_Yersinia"
+
+unique(RNA_data$condition)
+table(RNA_data$condition)
+#IEL crypto has the lowest number of cells 1742
+Idents(RNA_data) <- "condition"
+RNA_data_ds_condition <- subset(x = RNA_data,  downsample = 1742)
+
+Idents(RNA_data_ds_condition) <- "InfectionStatus"
+unique(Idents(RNA_data_ds_condition))
+Crypto_cells <- WhichCells(RNA_data_ds_condition, idents = "Cryptosporidium")
+Naive_cells <- WhichCells(RNA_data_ds_condition, idents = "Naive")
+Yersinia_cells <- WhichCells(RNA_data_ds_condition, idents = "Yersinia")
+Idents(RNA_data_ds_infection) <- "PreliminaryClusters"
+
+DimPlot(RNA_data_ds_infection, reduction = "wnn.umap_cc", label.size = 4, label = TRUE, repel = F, cells = Crypto_cells, combine = T) + NoLegend()
+DimPlot(RNA_data_ds_infection, reduction = "wnn.umap_cc", label.size = 4, label = TRUE, repel = F, cells = Naive_cells, combine = T) + NoLegend()
+DimPlot(RNA_data_ds_infection, reduction = "wnn.umap_cc", label.size = 4, label = TRUE, repel = F, cells = Yersinia_cells, combine = T) + NoLegend()
+
+#Save plots
+ setwd(out)
+
+   png(file = "Yersinia_UMAP_allTissues_downsamp.png", width = 4000, height =4000, units = "px", res = 600)
+DimPlot(RNA_data_ds_condition, reduction = "wnn.umap_cc",   group.by = "PreliminaryClusters", cells = Yersinia_cells,
+  combine = TRUE, label.size = 3, label = TRUE, raster = FALSE) + NoLegend() +ggtitle("Yersinia Infected")
+dev.off()
+   png(file = "Naive_UMAP_allTissues_downsamp.png", width = 4000, height =4000, units = "px", res = 600)
+DimPlot(RNA_data_ds_condition, reduction = "wnn.umap_cc",   group.by = "PreliminaryClusters", cells = Naive_cells,
+  combine = TRUE, label.size = 3, label = TRUE, raster = FALSE) + NoLegend() +ggtitle("Naive")
+dev.off()
+   png(file = "Crypto_UMAP_allTissues_downsamp.png", width = 4000, height =4000, units = "px", res = 600)
+DimPlot(RNA_data_ds_condition, reduction = "wnn.umap_cc",   group.by = "PreliminaryClusters", cells = Crypto_cells,
+  combine = TRUE, label.size = 3, label = TRUE, raster = FALSE) + NoLegend() +ggtitle("Cryptosporidium Infected")
+dev.off()
+
+
+
+```
+
+
+#Add metadata which identifies Crypto infected cells - This comes from a separate R markdown (Crypto_scData.Rmd) where the files are read and filtered and the names of cells which have reads mapping to crypto are exported as infection_vec
+```{r}
+RNA_data$infected_cells = ifelse(colnames(RNA_data) %in% infection_vec, 'Infected', 'Not_Infected')
+Idents(RNA_data) <- "infected_cells"
+infected <- WhichCells(RNA_data, idents = c("Infected"))
+not_infected <- WhichCells(RNA_data, idents = c( "Not_Infected"))
+DimPlot(RNA_data, label=F, reduction = "wnn.umap", cells.highlight= infected, cols.highlight = "darkblue", cols= "grey", sizes.highlight = 1, pt.size = 0.5, raster = FALSE)
+
+setwd(out)
+   png(file = "Umap_Crypto_infectedCells_highlighted.png", width = 4000, height =4000, units = "px", res = 600)
+DimPlot(RNA_data, label=F, reduction = "wnn.umap", cells.highlight= infected, cols.highlight = "darkblue", cols= "grey", sizes.highlight = 1, pt.size = 0.5, raster = FALSE) + ggtitle("Crypto Infected Cells")
+dev.off()
+table(RNA_data$infected_cells)
+```
+
+
+
+#Export as h5ad for cellxgene which does not allow for multimodal data
+```{r}
+#install the package which converts from sce to anndata object
+#BiocManager::install("zellkonverter")
+#The current reduction save for the wnn_cc is ADT and I have to correct this or it will not save the map 
+RNA_data@reductions$wnn.umap_cc@assay.used <- "RNA"
+RNA_data[["RNA"]]
+#append the protein data so that it can be visualized in cellxgene
+counts_new <- rbind(RNA_data@assays$RNA$counts, RNA_data@assays$ADT$counts)
+RNA_only <-CreateSeuratObject(counts = counts_new, assay = "RNA")
+data_new <- rbind(RNA_data@assays$RNA$data, RNA_data@assays$ADT$data)
+RNA_only@assays$RNA$data <- data_new
+
+RNA_only@meta.data <- RNA_data@meta.data
+RNA_only@reductions <- RNA_data@reductions
+RNA_only@neighbors <- RNA_data@neighbors
+RNA_only@graphs <- RNA_data@graphs
+RNA_only[["RNA"]]$scale.data <- NULL 
+RNA_only[["ADT"]] <- NULL
+
+
+nrow(RNA_only@assays$RNA$counts)
+rownames(RNA_only@assays$RNA$counts)[20736:20742]
+library(SeuratDisk)
+
+
+#Rename the primary umap so it appears first
+RNA_only[["a.wnn.umap"]] <-RNA_data[["wnn.umap_cc"]] 
+
+RNA_only@reductions$pca_adt <- NULL
+RNA_only@reductions$umap_adt_unintegrated <- NULL
+RNA_only@reductions$umap.integrated.ADT <- NULL
+RNA_only@reductions$integrated.ADT.rpca <- NULL
+RNA_only@meta.data$nCount_ADT <- NULL
+RNA_only@meta.data$nFeature_ADT <- NULL
+RNA_only@meta.data$drop.class <- NULL
+RNA_only@meta.data$adt.cluster_unintergrated <- NULL
+RNA_only@meta.data$seurat_clusters <- NULL
+RNA_only@meta.data$unintegrated_RNA_clusters <- NULL
+RNA_only@meta.data$sub.cluster_44 <- NULL
+RNA_only@meta.data$Monocytes_subcluster <- NULL
+RNA_only@meta.data$sub.cluster_34 <- NULL
+RNA_only@meta.data$sub.cluster_34 <- NULL
+RNA_only@meta.data$Doublet <- NULL
+RNA_only@meta.data$adt_integrated_clusters <- NULL
+RNA_only@meta.data$rpca_integration_clusters <- NULL
+RNA_only@meta.data$harmony_integration_clusters <- NULL
+RNA_only@meta.data$old.ident <- NULL
+RNA_only@meta.data$Monocle_clusters <- NULL
+RNA_only@meta.data$Monocle_partitions <- NULL
+
+#RNA_only[["Azimuth_labels_l2"]] <- RNA_only$predicted.celltype.l2
+#RNA_only[["Azimuth_labels_score"]] <- RNA_only$predicted.celltype.l2.score
+RNA_only@meta.data$predicted.celltype.l1.score <- NULL
+RNA_only@meta.data$predicted.celltype.l1 <- NULL
+RNA_only@meta.data$predicted.celltype.l2 <- NULL
+RNA_only@meta.data$predicted.celltype.l2.score <- NULL
+RNA_only@meta.data$predicted.celltype.l3 <- NULL
+RNA_only@meta.data$predicted.celltype.l3.score <- NULL
+RNA_only@meta.data$celltype <- NULL
+
+#RNA_only[["CellType"]] <- RNA_only$PreliminaryClusters
+RNA_only@meta.data$PreliminaryClusters <- NULL
+RNA_only@meta.data$WNN_clusters2 <- NULL
+RNA_only@reductions$wnn.umap3D <- NULL
+RNA_only@reductions$integrated.harmony <- NULL
+RNA_only@reductions$umap.harmony <- NULL
+RNA_only@reductions$unintegrated_pca_adt <- NULL
+
+
+#Some factors need to be converted to characters for the best visualization in cellxgene
+eh <-unlist(RNA_only[["WNN_clusters"]])
+eh <- as.character(eh) 
+RNA_only@meta.data["WNN_clusters1"] <- eh 
+eh <-unlist(RNA_only[["WNN_clusters_cc"]])
+eh <- as.character(eh) 
+RNA_only@meta.data["WNN_clusters1_cc"] <- eh 
+
+#str(RNA_only)
+RNA_only[["RNA"]] <- as(RNA_only[["RNA"]], "Assay")
+SaveH5Seurat(RNA_only, filename = "/data/hartandrew/MIST/SingleCell/Output/Seurat_files/RNA.h5Seurat", overwrite = T)
+Convert("/data/hartandrew/MIST/SingleCell/Output/Seurat_files/RNA.h5Seurat",   assay = "RNA", dest = "h5ad", overwrite = TRUE)
+
+#Remove additional parameters to make suitable for sharing with others external 
+RNA_only@meta.data$Tuft_Features1 <- NULL
+RNA_only@meta.data$Paneth_Features1 <- NULL
+RNA_only@meta.data$Goblet_Features1 <- NULL
+RNA_only@meta.data$StemCell_Features1 <- NULL
+RNA_only@meta.data$Enteroendocrine_Features1 <- NULL
+RNA_only@meta.data$WNN_clusters_cc <- NULL
+RNA_only@meta.data$Chemistry <- NULL
+RNA_only@meta.data$S.Score <- NULL
+RNA_only@meta.data$G2M.Score <- NULL
+RNA_only@meta.data$RNA.weight <- NULL
+RNA_only@meta.data$ADT.weight <- NULL
+RNA_only@meta.data$WNN_clusters <- NULL
+RNA_only@meta.data$scDblFinder.weighted <- NULL
+RNA_only@meta.data$scDblFinder.score <- NULL
+RNA_only@meta.data$scDblFinder.difficulty <- NULL
+RNA_only@meta.data$scDblFinder.cxds_score <- NULL
+RNA_only@meta.data$Bcell_pseudotime <- NULL
+RNA_only@meta.data$celltype.condition.sample <- NULL
+RNA_only@meta.data$celltype.condition <- NULL
+RNA_only@meta.data$Azimuth_labels_score <- NULL
+RNA_only@meta.data$condition <- NULL
+RNA_only@meta.data$WNN_clusters1 <- NULL
+
+
+RNA_only@reductions$azimuth.umap <- NULL
+RNA_only@reductions$common_tcca <- NULL
+RNA_only@reductions$distinct1_tcca <- NULL
+RNA_only@reductions$distinct2_tcca <- NULL
+RNA_only@reductions$integrated.rpca <- NULL
+RNA_only@reductions$umap.rpca <- NULL
+RNA_only@reductions$unintegrated_RNA_pca <- NULL
+RNA_only@reductions$unintegrated_RNA_umap <- NULL
+RNA_only@reductions$wnn.umap <- NULL
+RNA_only@reductions$wnn.umap_cc <- NULL
+RNA_only@meta.data$Tissue[RNA_only$Tissue == "Intra-Epithelial Lymphocytes"] <- "Intestinal Epithelial Cells"
+
+#save the reduced file to b shared with our collaborators 
+RNA_only[["RNA"]] <- as(RNA_only[["RNA"]], "Assay")
+SaveH5Seurat(RNA_only, filename = "/data/hartandrew/MIST/SingleCell/Output/Seurat_files/RNA_reduced.h5Seurat", overwrite = T)
+Convert("/data/hartandrew/MIST/SingleCell/Output/Seurat_files/RNA_reduced.h5Seurat",   assay = "RNA", dest = "h5ad", overwrite = TRUE)
+```
+#Save Rds file
+```{r}
+SaveSeuratRds(
+  RNA_data,
+  file = "/data/hartandrew/MIST/SingleCell/Output/Working_Seurat.Rds")
+
+FeaturePlot(RNA_data, "Il1r1", reduction = "wnn.umap_cc" )
+
+```
+
+
