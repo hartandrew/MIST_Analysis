@@ -14,7 +14,7 @@ Primary_analysis_02.Rmd - This is an R markdown file containing the code to perf
 
 Crypto_scData.Rmd - This is an R markdown file which utilizes separate Cellranger output. For this analysis, the sequences were run through cellranger aligment using the Cryptosporidium genome reference to map reads which would have come from cells infected with Cryptosporidium. In the R markdown file, this output is loaded and filtered and the barcode identities of the infected cells were output/saved and later used in "Primary_Analysis_02.Rmd" to identify and label cells that were infected with Cryptosporidium. As expected, these are epithelial cells of the intestinal epithelial cell compartment. 
 
-Description of CellxGene field available
+Description of CellxGene fields available
 
 Azimuth_labels_l2 – Azimuth (an R package) automated cell annotation output (mid level specificity)
 
