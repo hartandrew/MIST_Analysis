@@ -12,7 +12,7 @@ Processing_01_reduced.Rmd - This is an R markdown file containing the code used 
 
 Primary_analysis_02.Rmd - This is an R markdown file containing the code to perform the bulk of the analysis as described in the paragraphs above (normalization, scaling, integration, clustering, annotation, UMAPs) as well as additional visualization and exploration.
 
-Crypto_scData.Rmd - This is an R markdown file which utilizes separate Cellranger output. For this analysis, the sequences were run through cellranger aligment using the Cryptosporidium genome reference to map reads which would have come from cells infected with Cryptosporidium. In the R markdown file, this output is loaded and filtered and the barcode identities of the infected cells were output/saved and later used in "Primary_Analysis_02.Rmd" to identify and label cells that were infected with Cryptosporidium. As expected, these are epithelial cells of the intestinal epithelial cell compartment. 
+Crypto_scData.Rmd - This is an R markdown file which utilizes separate Cellranger output. For this analysis, the sequences were run through cellranger alignment using the Cryptosporidium genome reference to map reads which would have come from cells infected with Cryptosporidium. In the R markdown file, this output is loaded and filtered and the barcode identities of the infected cells were output/saved and later used in "Primary_Analysis_02.Rmd" to identify and label cells that were infected with Cryptosporidium. As expected, these are epithelial cells of the intestinal epithelial cell compartment. 
 
 Description of CellxGene fields available
 
