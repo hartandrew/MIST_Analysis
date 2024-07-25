@@ -14,5 +14,39 @@ Primary_analysis_02.Rmd - This is an R markdown file containing the code to perf
 
 Crypto_scData.Rmd - This is an R markdown file which utilizes separate Cellranger output. For this analysis, the sequences were run through cellranger aligment using the Cryptosporidium genome reference to map reads which would have come from cells infected with Cryptosporidium. In the R markdown file, this output is loaded and filtered and the barcode identities of the infected cells were output/saved and later used in "Primary_Analysis_02.Rmd" to identify and label cells that were infected with Cryptosporidium. As expected, these are epithelial cells of the intestinal epithelial cell compartment. 
 
+Description of CellxGene field available
 
+Azimuth_labels_l2 – Azimuth (an R package) automated cell annotation output (mid level specificity)
+
+CellType – The curated and working cell type definitions based on combining automated labeling, manual scoring and manual visualization of populations
+
+Crypto_infected_cells – Literally the cells which have substantial cryptosporidium-mapping reads – ie the cell is/is not infected with cryptosporidium
+
+InfectionStatus – What was the mouse condition (Naïve, yersinia infected, crypto infected)
+
+Mouse – Shows the individual mouse – useful for comparing between two different replicates of an infection model
+
+Phase – The cell cycle phase assigned to a cell by Seurats cellcycle scoring function
+
+SingleR.labels.wnn – The SingleR package’s automated cell type labels for each of the clusters - Immgen RNA set data from the package celldex were used as references
+
+Tissue – What anatomical niche is represented by the sample (ileum draining MLN, ileum LP, ileum epithelial layer)
+
+WNN_clusters1_cc – These are the original clusters which were defined. Notably some of them have been separated if they appeared to contain multiple cell types or they have been combined if they represent one larger cell type.  – This is useful alternative to looking at the cells by defined cell type. 
+
+Orig.Ident – The mouse/tissue combination that identifies a sample
+
+Ncount_RNA – Total reads per cell – not useful because they all cluster at the bottom
+
+nFeature_RNA – The number of genes identified per cell
+
+rna.size – a transformed version of the total RNA transcript reads per cell which accurately reflects the scale on cellxgene
+
+prot.size - a transformed version of the total AB-linked reads per cell which accurately reflects the scale on cellxgene
+
+n.gene – same as nfeature_RNA 
+
+mt.prop – the proportion of mitochondrial reads – mostly a quality control unless someone has a specific interest
+
+Epithelial Pseudotime – Monocle generated pseudo time of the epithelial compartment – Useful for identifying the more mature (apical villus) enterocyte cells from less mature cells
 
