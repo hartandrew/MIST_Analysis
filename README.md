@@ -19,11 +19,12 @@ Annotations of cell types were performed using several methods. First, SingleR w
 
 # Description of CellxGene fields available
 
-- CellType (curated) – The curated and working cell type definitions based on combining automated labeling, manual scoring and manual visualization of populations
+- Cell Cycle Phase – The cell cycle phase assigned to a cell by Seurats cellcycle scoring function
+- Cell Type (curated) – The curated and working cell type definitions based on combining automated labeling, manual scoring and manual visualization of populations
 - InfectionStatus – What was the mouse condition (Naïve, yersinia infected, crypto infected)
 - Mouse – Shows the individual mouse – useful for comparing between two different replicates of an infection model
-- Cell cycle phase – The cell cycle phase assigned to a cell by Seurats cellcycle scoring function
 - Tissue – What anatomical niche is represented by the sample (ileum draining MLN, ileum LP, ileum epithelial layer)
+- WNN_clusters1_cc - these are the original weighted nearest neighbor clusters assigned by Seurat
 - Orig.Ident – The mouse/tissue combination that identifies a sample
 - nFeature_RNA – The number of genes identified per cell
 - rna.size – a transformed version of the total RNA transcript reads per cell which accurately reflects the scale on cellxgene
