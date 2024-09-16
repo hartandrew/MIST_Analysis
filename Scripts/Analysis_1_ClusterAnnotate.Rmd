@@ -1,0 +1,1150 @@
+---
+title: "SingleCell_Analysis"
+author: "AndrewHart"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+##Load the Libraries----
+```{r, warning=FALSE, error=FALSE}
+library(Seurat)
+library(Signac)
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(data.table)
+library(cowplot)
+library(scCustomize)
+library(forcats)
+library(ggbreak)
+library(presto)
+library(ggforce)
+library(SingleR)
+library(celldex)
+library(harmony)
+#library(Azimuth)
+library(glmGamPoi)
+library(future)
+library(dsb)
+library(RColorBrewer)
+library(monocle3)
+library(gt)
+options(future.globals.maxSize = 5000 * 1024^2)
+```
+
+#directory set up
+```{r}
+getwd() #/home/hartandrew
+setwd("/data/hartandrew/Projects/MIST/MIST_Analysis")
+out <- "/data/hartandrew/Projects/MIST/MIST_Analysis/Output"
+version <- "/data/hartandrew/Projects/MIST/MIST_Analysis/Version"
+seurat <- "/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files"
+images <- "/data/hartandrew/Projects/MIST/MIST_Analysis/Images"
+CSV <- "/data/hartandrew/Projects/MIST/MIST_Analysis/CSV"
+```
+
+#The R environment for the merged objects prior to downstream analysis was loaded - Ileum_MLN_combined_prior_to_anlysis.RData in Seurat_Files for this project
+
+#Color Picking
+```{r}
+# I have chosen 6 colors to represent the 6 different types of infections
+colors6 <- c("#980339", "#379FFB", "#D6A206", "#027102", "#6313B7", "#AFAFAF")
+colors5 <- c("#980339", "#379FFB", "#D6A206", "#027102", "#6313B7")
+```
+#QC Averages across samples
+```{r}
+rna_counts <-c() # define empty obj
+rna_counts_sd <- c()
+Idents(MLN_data) <- "orig.ident"
+for (ident in  levels(MLN_data@active.ident)) {
+  rna_counts <- c(rna_counts, mean(MLN_data@meta.data$nCount_RNA[MLN_data@meta.data$orig.ident==ident]))}
+for (ident in  levels(MLN_data@active.ident)) {
+  rna_counts_sd <- c(rna_counts_sd, sd(MLN_data@meta.data$nCount_RNA[MLN_data@meta.data$orig.ident==ident]))}
+rna_counts <- as.data.frame(rna_counts)
+rna_counts$sample <- levels(MLN_data@active.ident)
+colnames(rna_counts) <- c("mean_RNAcount", "Sample")
+rna_counts$SD <- rna_counts_sd
+rna_counts$infection <- rna_counts$Sample
+rna_counts$infection[rna_counts$Sample %like% "CHMI2482" | rna_counts$Sample %like% "CHMI24109"] <- "Naive"
+rna_counts$infection[rna_counts$Sample %like% "CHMI2489" | rna_counts$Sample %like% "CHMI2493" | rna_counts$Sample %like% "CHMI24240"] <- "Cryptosporidium"
+rna_counts$infection[rna_counts$Sample %like% "CHMI24134"| rna_counts$Sample %like% "CHMI24142"] <- "Yersinia"
+rna_counts$infection[rna_counts$Sample %like% "CHMI24180"  ] <- "H.Poly"
+rna_counts$infection[rna_counts$Sample %like% "CHMI24218"| rna_counts$Sample %like% "CHMI24235" ] <- "Candida"
+rna_counts$infection <- factor(rna_counts$infection , levels =c("Naive", "Cryptosporidium", "Yersinia", "Candida", "H.Poly"))
+ rna_counts %>%
+   mutate(Sample = reorder(Sample,  factor(infection, levels =c("Naive", "Cryptosporidium", "Yersinia", "Candida", "H.Poly")))) %>%
+ggplot( aes(Sample, mean_RNAcount)) + 
+  geom_col(aes(fill = infection)) + 
+   scale_fill_manual(values=colors5) + 
+    theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+            strip.background = element_rect(fill = "grey85", 
+                colour = "grey20"), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+
+  ggsave("MLN_QC_Mean_RNA_count_barchart.png",plot = last_plot(), device = NULL,
+  path = images,scale = 1, width = 7, height = 5,  units = c("in"),dpi = 600, limitsize = TRUE, bg = NULL)
+  
+  
+  rna_counts <-c() # define empty obj
+rna_counts_sd <- c()
+Idents(Ileum_data) <- "orig.ident"
+for (ident in  levels(Ileum_data@active.ident)) {
+  rna_counts <- c(rna_counts, mean(Ileum_data@meta.data$nCount_RNA[Ileum_data@meta.data$orig.ident==ident]))}
+for (ident in  levels(Ileum_data@active.ident)) {
+  rna_counts_sd <- c(rna_counts_sd, sd(Ileum_data@meta.data$nCount_RNA[Ileum_data@meta.data$orig.ident==ident]))}
+rna_counts <- as.data.frame(rna_counts)
+rna_counts$sample <- levels(Ileum_data@active.ident)
+colnames(rna_counts) <- c("mean_RNAcount", "Sample")
+rna_counts$SD <- rna_counts_sd
+rna_counts$infection <- rna_counts$Sample
+rna_counts$infection[rna_counts$Sample %like% "CHMI2482" | rna_counts$Sample %like% "CHMI24109"] <- "Naive"
+rna_counts$infection[rna_counts$Sample %like% "CHMI2489" | rna_counts$Sample %like% "CHMI2493" | rna_counts$Sample %like% "CHMI24240"] <- "Cryptosporidium"
+rna_counts$infection[rna_counts$Sample %like% "CHMI24134"| rna_counts$Sample %like% "CHMI24142"] <- "Yersinia"
+rna_counts$infection[rna_counts$Sample %like% "CHMI24180"  ] <- "H.Poly"
+rna_counts$infection[rna_counts$Sample %like% "CHMI24218"| rna_counts$Sample %like% "CHMI24235" ] <- "Candida"
+rna_counts$infection <- factor(rna_counts$infection , levels =c("Naive", "Cryptosporidium", "Yersinia", "Candida", "H.Poly"))
+ rna_counts %>%
+   mutate(Sample = reorder(Sample,  factor(infection, levels =c("Naive", "Cryptosporidium", "Yersinia", "Candida", "H.Poly")))) %>%
+ggplot( aes(Sample, mean_RNAcount)) + 
+  geom_col(aes(fill = infection)) + 
+   scale_fill_manual(values=colors5) + 
+    theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+            strip.background = element_rect(fill = "grey85", 
+                colour = "grey20"), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+
+  ggsave("Ileum_QC_Mean_RNA_count_barchart.png",plot = last_plot(), device = NULL,
+  path = images,scale = 1, width = 7, height = 5,  units = c("in"),dpi = 600, limitsize = TRUE, bg = NULL)
+```
+
+#The Combined/filtered data prior to any analysis is saved in Combined_preAnalysis.Rdata
+
+
+#Save QC plots across samples
+```{r}
+v4 <- c("CHMI24109_IEL", "CHMI24109_LP", "CHMI24109_MLN", "CHMI2493_MLN", "CHMI2493_LP", "CHMI24134_MLN", "CHMI24134_LP", "CHMI24134_IEL", "CHMI24142_MLN", "CHMI24142_IEL", "CHMI24142_LP", "CHMI24180_MLN", "CHMI24218_MLN", "CHMI24218_LP", "CHMI24218_IEL", "CHMI24240_MLN", "CHMI24240_LP", "CHMI24240_IEL", "CHMI24235_MLN")
+v3 <- c("CHMI2482_MLN", "CHMI2482_LP", "CHMI2482_IEL", "CHMI2489_MLN", "CHMI2489_IEL", "CHMI2489_LP")
+MLN_data@meta.data$Chemistry[MLN_data$orig.ident %in% v4] <- "10X_v4"
+MLN_data@meta.data$Chemistry[MLN_data$orig.ident %in% v3] <- "10X_v3"
+
+ VlnPlot(MLN_data, features = c("nFeature_RNA"), pt.size = 0, group.by = "orig.ident", split.by = "Chemistry") + NoLegend() +  theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+            strip.background = element_rect(fill = "grey85", 
+            colour = "grey20"), axis.title.x = element_blank(),  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+   ggsave("MLN_Violin_RNA_feature_per_sample.png",plot = last_plot(), device = NULL,
+  path = images ,scale = 1, width = 8, height = 5,  units = c("in"),
+  dpi = 600, limitsize = TRUE, bg = NULL)
+   
+  VlnPlot(MLN_data, features = c("nCount_RNA"), pt.size = 0, group.by = "orig.ident", split.by = "Chemistry") + NoLegend() +  theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+            strip.background = element_rect(fill = "grey85", 
+            colour = "grey20"), axis.title.x = element_blank(),  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+     ggsave("MLN_Violin_RNA_count_per_sample.png",plot = last_plot(), device = NULL,
+  path = images,scale = 1, width = 8, height = 5,  units = c("in"), dpi = 600, limitsize = TRUE, bg = NULL)
+     
+    VlnPlot(MLN_data, features = c("mt.prop"), pt.size = 0, group.by = "orig.ident", split.by = "Chemistry") + NoLegend() +  theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+            strip.background = element_rect(fill = "grey85", 
+            colour = "grey20"), axis.title.x = element_blank(),  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+     ggsave("MLN_Violin_mt.prop_per_sample.png",plot = last_plot(), device = NULL,
+  path = images,scale = 1, width = 8, height = 5,  units = c("in"), dpi = 600, limitsize = TRUE, bg = NULL)
+     
+     
+     Ileum_data@meta.data$Chemistry[Ileum_data$orig.ident %in% v4] <- "10X_v4"
+Ileum_data@meta.data$Chemistry[Ileum_data$orig.ident %in% v3] <- "10X_v3"
+
+ VlnPlot(Ileum_data, features = c("nFeature_RNA"), pt.size = 0, group.by = "orig.ident", split.by = "Chemistry") + NoLegend() +  theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+            strip.background = element_rect(fill = "grey85", 
+            colour = "grey20"), axis.title.x = element_blank(),  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+   ggsave("Ileum_Violin_RNA_feature_per_sample.png",plot = last_plot(), device = NULL,
+  path = images ,scale = 1, width = 8, height = 5,  units = c("in"),
+  dpi = 600, limitsize = TRUE, bg = NULL)
+   
+  VlnPlot(Ileum_data, features = c("nCount_RNA"), pt.size = 0, group.by = "orig.ident", split.by = "Chemistry") + NoLegend() +  theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+            strip.background = element_rect(fill = "grey85", 
+            colour = "grey20"), axis.title.x = element_blank(),  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+     ggsave("Ileum_Violin_RNA_count_per_sample.png",plot = last_plot(), device = NULL,
+  path = images,scale = 1, width = 8, height = 5,  units = c("in"), dpi = 600, limitsize = TRUE, bg = NULL)
+     
+    VlnPlot(Ileum_data, features = c("mt.prop"), pt.size = 0, group.by = "orig.ident", split.by = "Chemistry") + NoLegend() +  theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+            strip.background = element_rect(fill = "grey85", 
+            colour = "grey20"), axis.title.x = element_blank(),  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+     ggsave("Ileum_Violin_mt.prop_per_sample.png",plot = last_plot(), device = NULL,
+  path = images,scale = 1, width = 8, height = 5,  units = c("in"), dpi = 600, limitsize = TRUE, bg = NULL)
+
+
+```
+
+
+```{r}
+#At this point, the RNA assay has only count (raw) layers and the ADT assay has both count (raw) and data (normalized) layers - as we expect
+head(colnames(MLN_data[["ADT"]]))
+head(colnames(MLN_data[["RNA"]]))
+
+#Split the combined and filtered data into the two assay for individual Integration
+MLN_RNA <- CreateSeuratObject(
+  MLN_data[["RNA"]],
+  project = "SeuratProject",
+  assay = "RNA",
+  names.field = 1,
+  names.delim = "_",
+  meta.data = MLN_data@meta.data)
+MLN_RNA
+#Check original identity
+table(MLN_RNA$orig.ident)
+
+#Split the combined and filtered data into the two assay for individual Integration
+Ileum_RNA <- CreateSeuratObject(
+  Ileum_data[["RNA"]],
+  project = "SeuratProject",
+  assay = "RNA",
+  names.field = 1,
+  names.delim = "_",
+  meta.data = Ileum_data@meta.data)
+Ileum_RNA
+#Check original identity
+table(Ileum_RNA$orig.ident)
+```
+
+````{r}
+MLN_data[['ADT']] <-  split(x = MLN_data[['ADT']], f = MLN_data$orig.ident)
+Layers(MLN_data[['ADT']])
+
+MLN_ADT <- CreateSeuratObject(
+  MLN_data[["ADT"]],
+  project = "SeuratProject",
+  assay = "ADT",
+  names.delim = "_",
+  meta.data = MLN_data@meta.data)
+MLN_ADT
+
+#Check original identity
+table(MLN_ADT$orig.ident)
+table(MLN_ADT$Tissue)
+table(MLN_ADT$InfectionStatus)
+#Save number of cells per sample
+ write.csv(table(MLN_ADT$orig.ident), paste0(CSV, "/MLN_Table_cells_per_sample_filtered.csv"))
+ write.csv(table(MLN_ADT$Tissue), paste0(CSV, "/MLN_Table_cells_per_Tissue_filtered.csv"))
+ write.csv(table(MLN_ADT$InfectionStatus), paste0(CSV,  "/MLN_Table_cells_per_InfectionStatus_filtered.csv"))
+ 
+ Ileum_data[['ADT']] <-  split(x = Ileum_data[['ADT']], f = Ileum_data$orig.ident)
+Layers(Ileum_data[['ADT']])
+
+Ileum_ADT <- CreateSeuratObject(
+  Ileum_data[["ADT"]],
+  project = "SeuratProject",
+  assay = "ADT",
+  names.delim = "_",
+  meta.data = Ileum_data@meta.data)
+Ileum_ADT
+
+#Check original identity
+table(Ileum_ADT$orig.ident)
+table(Ileum_ADT$Tissue)
+table(Ileum_ADT$InfectionStatus)
+#Save number of cells per sample
+ write.csv(table(Ileum_ADT$orig.ident), paste0(CSV, "/Ileum_Table_cells_per_sample_filtered.csv"))
+ write.csv(table(Ileum_ADT$Tissue), paste0(CSV, "/Ileum_Table_cells_per_Tissue_filtered.csv"))
+ write.csv(table(Ileum_ADT$InfectionStatus), paste0(CSV,  "/Ileum_Table_cells_per_InfectionStatus_filtered.csv"))
+```
+
+
+
+#RNA-BASED CLUSTERING before integration
+```{r}
+#This chunk - 8 minutes to run on server
+DefaultAssay(MLN_RNA) <- "RNA"
+MLN_RNA[['RNA']] <-  JoinLayers(MLN_RNA[['RNA']])
+MLN_RNA[['RNA']] <-  split(x = MLN_RNA[['RNA']], f = MLN_RNA$InfectionStatus)
+MLN_RNA <- NormalizeData(MLN_RNA)
+MLN_RNA <- FindVariableFeatures(MLN_RNA, selection.method = "vst", nfeatures = 3000) 
+
+VariableFeaturePlot(MLN_RNA, cols = c("black", "red"),
+  pt.size = 0.1, log = NULL, selection.method = NULL, raster = FALSE) + scale_y_log10()
+
+all.genes <- rownames(MLN_RNA[["RNA"]])
+MLN_RNA <- ScaleData(MLN_RNA, features = all.genes)
+
+MLN_RNA <- RunPCA(MLN_RNA, verbose = FALSE, reduction.name = "unintegrated_RNA_pca")
+ElbowPlot(MLN_RNA, reduction = "unintegrated_RNA_pca", ndims = 50)
+# Determine percent of variation associated with each PC
+pct <- MLN_RNA[["unintegrated_RNA_pca"]]@stdev / sum(MLN_RNA[["unintegrated_RNA_pca"]]@stdev) * 100
+# Calculate cumulative percents for each PC
+cumu <- cumsum(pct)
+# Determine which PC exhibits cumulative percent greater than 90% and % variation associated with the PC as less than 5
+co1 <- which(cumu > 90 & pct < 5)[1]
+co1 #Gives a very high number
+
+#Method 2 to determine the PC at which point the percentage of change in PC drops to <0.1 
+# Determine the difference between variation of PC and subsequent PC
+co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+# last point where change of % of variation is more than 0.1%.
+co2 #gives a very low number - usually this is the one that is more accurate
+#Visualize the total percent variation captured by the cumultaive PC chosen
+plot_df <- data.frame(pct = pct, 
+           cumu = cumu, 
+           rank = 1:length(pct))
+  ggplot(plot_df, aes(cumu, pct, label = rank)) + 
+  geom_text() + 
+  geom_vline(xintercept = 90, color = "grey") + 
+  geom_hline(yintercept = min(pct[pct > 5]), color = "grey") +
+  theme_bw()
+
+
+MLN_RNA <- FindNeighbors(MLN_RNA, dims = 1:25, reduction = "unintegrated_RNA_pca")
+MLN_RNA <- FindClusters(MLN_RNA, resolution = 2, verbose = FALSE, cluster.name = "unintegrated_RNA_clusters", group.singletons = F)
+MLN_RNA <- RunUMAP(MLN_RNA, dims = 1:25, reduction = "unintegrated_RNA_pca", reduction.name = "unintegrated_RNA_umap")
+RNA_umap_unint <- DimPlot(MLN_RNA, reduction = "unintegrated_RNA_umap", group.by = c("unintegrated_RNA_clusters", "Tissue", "InfectionStatus"), combine = FALSE)
+RNA_umap_unint
+```
+
+
+
+```{r}
+DefaultAssay(Ileum_RNA) <- "RNA"
+Ileum_RNA[['RNA']] <-  JoinLayers(Ileum_RNA[['RNA']])
+Ileum_RNA[['RNA']] <-  split(x = Ileum_RNA[['RNA']], f = Ileum_RNA$InfectionStatus)
+Ileum_RNA <- NormalizeData(Ileum_RNA)
+Ileum_RNA <- FindVariableFeatures(Ileum_RNA, selection.method = "vst", nfeatures = 3000) 
+
+VariableFeaturePlot(Ileum_RNA, cols = c("black", "red"),
+  pt.size = 0.1, log = NULL, selection.method = NULL, raster = FALSE) + scale_y_log10()
+
+all.genes <- rownames(Ileum_RNA[["RNA"]])
+Ileum_RNA <- ScaleData(Ileum_RNA, features = all.genes)
+
+Ileum_RNA <- RunPCA(Ileum_RNA, verbose = FALSE, reduction.name = "unintegrated_RNA_pca")
+ElbowPlot(Ileum_RNA, reduction = "unintegrated_RNA_pca", ndims = 50)
+# Determine percent of variation associated with each PC
+pct <- Ileum_RNA[["unintegrated_RNA_pca"]]@stdev / sum(Ileum_RNA[["unintegrated_RNA_pca"]]@stdev) * 100
+# Calculate cumulative percents for each PC
+cumu <- cumsum(pct)
+# Determine which PC exhibits cumulative percent greater than 90% and % variation associated with the PC as less than 5
+co1 <- which(cumu > 90 & pct < 5)[1]
+co1 #Gives a very high number
+
+#Method 2 to determine the PC at which point the percentage of change in PC drops to <0.1 
+# Determine the difference between variation of PC and subsequent PC
+co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+# last point where change of % of variation is more than 0.1%.
+co2 #gives a very low number - usually this is the one that is more accurate
+#Visualize the total percent variation captured by the cumultaive PC chosen
+plot_df <- data.frame(pct = pct, 
+           cumu = cumu, 
+           rank = 1:length(pct))
+  ggplot(plot_df, aes(cumu, pct, label = rank)) + 
+  geom_text() + 
+  geom_vline(xintercept = 90, color = "grey") + 
+  geom_hline(yintercept = min(pct[pct > 5]), color = "grey") +
+  theme_bw()
+
+  
+Ileum_RNA <- FindNeighbors(Ileum_RNA, dims = 1:25, reduction = "unintegrated_RNA_pca")
+Ileum_RNA <- FindClusters(Ileum_RNA, resolution = 2, verbose = FALSE, cluster.name = "unintegrated_RNA_clusters", group.singletons = F)
+Ileum_RNA <- RunUMAP(Ileum_RNA, dims = 1:25, reduction = "unintegrated_RNA_pca", reduction.name = "unintegrated_RNA_umap")
+RNA_umap_unint <- DimPlot(Ileum_RNA, reduction = "unintegrated_RNA_umap", group.by = c("unintegrated_RNA_clusters", "Tissue", "InfectionStatus"), combine = FALSE)
+RNA_umap_unint
+
+```
+
+
+
+
+#INTEGRATE RNA (RPCA)
+```{r}
+#chunk takes 15 minutes
+options(future.globals.maxSize = 5000 * 1024^2)
+ MLN_RNA[['RNA']] <-  JoinLayers(MLN_RNA[['RNA']])
+ MLN_RNA[['RNA']] <-  split(x = MLN_RNA[['RNA']], f = MLN_RNA$InfectionStatus)
+MLN_RNA <- IntegrateLayers(
+  object = MLN_RNA, method = RPCAIntegration, 
+  orig.reduction = "unintegrated_RNA_pca", new.reduction = "integrated.rpca",
+  verbose = FALSE)
+
+DefaultAssay(MLN_RNA) <- "RNA"
+MLN_RNA <- FindNeighbors(MLN_RNA, reduction = "integrated.rpca", dims = 1:25)
+MLN_RNA <- FindClusters(MLN_RNA, resolution = 2, cluster.name = "rpca_integration_clusters", group.singletons = F)
+MLN_RNA <- RunUMAP(MLN_RNA, reduction = "integrated.rpca", dims = 1:25, reduction.name = "umap.rpca")
+RNA_umap_rpca <- DimPlot(MLN_RNA, reduction = "umap.rpca", group.by = c("rpca_integration_clusters", "Tissue", "InfectionStatus"), combine = FALSE, label.size = 4, label = TRUE)
+RNA_umap_rpca
+
+ Ileum_RNA[['RNA']] <-  JoinLayers(Ileum_RNA[['RNA']])
+Ileum_RNA[['RNA']] <-  split(x = Ileum_RNA[['RNA']], f = Ileum_RNA$InfectionStatus)
+Ileum_RNA <- IntegrateLayers(
+  object = Ileum_RNA, method = RPCAIntegration, 
+  orig.reduction = "unintegrated_RNA_pca", new.reduction = "integrated.rpca",
+  verbose = FALSE)
+
+DefaultAssay(Ileum_RNA) <- "RNA"
+Ileum_RNA <- FindNeighbors(Ileum_RNA, reduction = "integrated.rpca", dims = 1:25)
+Ileum_RNA <- FindClusters(Ileum_RNA, resolution = 2, cluster.name = "rpca_integration_clusters", group.singletons = F)
+Ileum_RNA <- RunUMAP(Ileum_RNA, reduction = "integrated.rpca", dims = 1:25, reduction.name = "umap.rpca")
+RNA_umap_rpca <- DimPlot(Ileum_RNA, reduction = "umap.rpca", group.by = c("rpca_integration_clusters", "Tissue", "InfectionStatus"), combine = FALSE, label.size = 4, label = TRUE)
+RNA_umap_rpca
+```
+
+
+
+# CEll Cycle Scoring, Regression, and effects on clusters 
+```{r}
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can
+# segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes.updated.2019$s.genes
+g2m.genes <- cc.genes.updated.2019$g2m.genes
+
+# Basic function to convert human to mouse gene names
+library(biomaRt)
+convertHumanGeneList <- function(x){
+require("biomaRt")
+human <- useMart("ensembl", dataset = "hsapiens_gene_ensembl", host = "https://dec2021.archive.ensembl.org/") 
+mouse <- useMart("ensembl", dataset = "mmusculus_gene_ensembl", host = "https://dec2021.archive.ensembl.org/")
+genesV2 = getLDS(attributes = c("hgnc_symbol"), filters = "hgnc_symbol", values = x , mart = human, attributesL = c("mgi_symbol"), martL = mouse, uniqueRows=T)
+humanx <- unique(genesV2[, 2])
+# Print the first 6 genes found to the screen
+print(head(humanx))
+return(humanx)
+}
+m.s.genes <- convertHumanGeneList(s.genes)
+m.g2m.genes <- convertHumanGeneList(g2m.genes)
+
+DefaultAssay(MLN_RNA) <- "RNA"
+MLN_RNA <- JoinLayers(MLN_RNA)
+MLN_RNA <- CellCycleScoring(MLN_RNA, s.features = m.s.genes, g2m.features = m.g2m.genes, set.ident = TRUE)
+DefaultAssay(Ileum_RNA) <- "RNA"
+Ileum_RNA <- JoinLayers(Ileum_RNA)
+Ileum_RNA <- CellCycleScoring(Ileum_RNA, s.features = m.s.genes, g2m.features = m.g2m.genes, set.ident = TRUE)
+```
+
+```{r}
+DimPlot(MLN_RNA, reduction = "umap.rpca",   group.by = c( "Phase", "rpca_integration_clusters"),
+  combine = FALSE, label.size = 2, label = TRUE, raster = F)
+DimPlot(Ileum_RNA, reduction = "umap.rpca",   group.by = c( "Phase", "rpca_integration_clusters"),
+  combine = FALSE, label.size = 2, label = TRUE, raster = F)
+
+
+```
+#Saved here 09082024
+```{r}
+#Evaluate RNA-derived Clusters Manually
+FeaturePlot(MLN_RNA, reduction = "umap.rpca",features = c( "Epcam", "Olfm4", "Lgr5", "Dclk1", "Fcgr3", "Ncam1"))
+FeaturePlot(MLN_RNA, reduction = "umap.rpca",features = c("Ighd",  "Cd3e", "Cd14",  "Cd4", "Ptprc", "Cd8a", "Ly6c1", "Klrg1"))
+FeaturePlot(Ileum_RNA, reduction = "umap.rpca",features = c( "Epcam", "Olfm4", "Lgr5", "Dclk1", "Fcgr3", "Ncam1"))
+FeaturePlot(Ileum_RNA, reduction = "umap.rpca",features = c("Ighd",  "Cd3e", "Cd14",  "Cd4", "Ptprc", "Cd8a", "Ly6c1", "Klrg1"))
+```
+
+#ADT Clustering
+```{r}
+# define proteins to use in clustering (non-isotype controls)
+rownames(MLN_ADT)
+MLN_ADT
+Isotype_labels <- grep("isotype", rownames(MLN_ADT), ignore.case = TRUE, value = TRUE)
+prots = rownames(MLN_ADT)[!rownames(MLN_ADT) %in% Isotype_labels] #remove isotypes
+
+#MLN_ADT <- FindVariableFeatures(MLN_ADT) # Use all features and the dsb normalized instead
+MLN_ADT[['ADT']] <-  JoinLayers(MLN_ADT[['ADT']])
+MLN_ADT[['ADT']] <-  split(x = MLN_ADT[['ADT']], f = MLN_ADT$InfectionStatus)
+MLN_ADT <- ScaleData(MLN_ADT, assay = "ADT")
+MLN_ADT <- RunPCA(MLN_ADT, features =prots, reduction.name = "unintegrated_pca_adt", reduction.key = "pcaADT_", verbose = FALSE)
+DimPlot(MLN_ADT, reduction = "unintegrated_pca_adt", group.by = "orig.ident")
+ElbowPlot(MLN_ADT, reduction = "unintegrated_pca_adt", ndims = 40)
+# Determine percent of variation associated with each PC
+pct <- MLN_ADT[["unintegrated_pca_adt"]]@stdev / sum(MLN_ADT[["unintegrated_pca_adt"]]@stdev) * 100
+# Calculate cumulative percents for each PC
+cumu <- cumsum(pct)
+# Determine which PC exhibits cumulative percent greater than 90% and % variation associated with the PC as less than 5
+co1 <- which(cumu > 90 & pct < 5)[1]
+co1 
+
+#Method 2 to determine the PC at which point the percentage of change in PC drops to <0.1 
+co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+# last point where change of % of variation is more than 0.1%.
+co2 
+#Visualize the total percent variation captured by the cumultaive PC chosen
+plot_df <- data.frame(pct = pct, 
+           cumu = cumu, 
+           rank = 1:length(pct))
+  ggplot(plot_df, aes(cumu, pct, label = rank)) + 
+  geom_text() + 
+  geom_vline(xintercept = 90, color = "grey") + 
+  geom_hline(yintercept = min(pct[pct > 5]), color = "grey") +
+  theme_bw()
+
+
+#There should be a way to find neighbors based on the normalized data and without using PCA - However, this method consistently crashed R 
+MLN_ADT <- FindNeighbors(object = MLN_ADT, dims = 1:20, features = VariableFeatures(object = MLN_ADT),
+                           k.param = 30, verbose = FALSE, reduction = "unintegrated_pca_adt" )
+
+#direct graph clustering 
+MLN_ADT <- FindClusters(MLN_ADT, resolution = 2,  graph.name = 'ADT_snn', verbose = FALSE, cluster.name = "unintegrated_ADT_clusters", group.singletons = F)
+MLN_ADT[['ADT']] <-  JoinLayers(MLN_ADT[['ADT']])
+MLN_ADT <- RunUMAP(object = MLN_ADT, assay = "ADT", features = prots, 
+                      n.neighbors = 30,  verbose = FALSE, reduction.name = "umap.ADT.unintegrated")
+
+DimPlot(MLN_ADT, reduction = "umap.ADT.unintegrated", group.by = c("unintegrated_ADT_clusters", "Tissue", "InfectionStatus"),
+  combine = FALSE, label.size = 2, label = TRUE)
+```
+```{r}
+# define proteins to use in clustering (non-isotype controls)
+rownames(Ileum_ADT)
+Ileum_ADT
+Isotype_labels <- grep("isotype", rownames(Ileum_ADT), ignore.case = TRUE, value = TRUE)
+prots = rownames(Ileum_ADT)[!rownames(Ileum_ADT) %in% Isotype_labels] #remove isotypes
+
+#Ileum_ADT <- FindVariableFeatures(Ileum_ADT) # Use all features and the dsb normalized instead
+Ileum_ADT[['ADT']] <-  JoinLayers(Ileum_ADT[['ADT']])
+Ileum_ADT[['ADT']] <-  split(x = Ileum_ADT[['ADT']], f = Ileum_ADT$InfectionStatus)
+Ileum_ADT <- ScaleData(Ileum_ADT, assay = "ADT")
+Ileum_ADT <- RunPCA(Ileum_ADT, features =prots, reduction.name = "unintegrated_pca_adt", reduction.key = "pcaADT_", verbose = FALSE)
+DimPlot(Ileum_ADT, reduction = "unintegrated_pca_adt", group.by = "orig.ident")
+ElbowPlot(Ileum_ADT, reduction = "unintegrated_pca_adt", ndims = 40)
+# Determine percent of variation associated with each PC
+pct <- Ileum_ADT[["unintegrated_pca_adt"]]@stdev / sum(Ileum_ADT[["unintegrated_pca_adt"]]@stdev) * 100
+# Calculate cumulative percents for each PC
+cumu <- cumsum(pct)
+# Determine which PC exhibits cumulative percent greater than 90% and % variation associated with the PC as less than 5
+co1 <- which(cumu > 90 & pct < 5)[1]
+co1 
+
+#Method 2 to determine the PC at which point the percentage of change in PC drops to <0.1 
+co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+# last point where change of % of variation is more than 0.1%.
+co2 
+#Visualize the total percent variation captured by the cumultaive PC chosen
+plot_df <- data.frame(pct = pct, 
+           cumu = cumu, 
+           rank = 1:length(pct))
+  ggplot(plot_df, aes(cumu, pct, label = rank)) + 
+  geom_text() + 
+  geom_vline(xintercept = 90, color = "grey") + 
+  geom_hline(yintercept = min(pct[pct > 5]), color = "grey") +
+  theme_bw()
+
+
+#There should be a way to find neighbors based on the normalized data and without using PCA - However, this method consistently crashed R 
+Ileum_ADT <- FindNeighbors(object = Ileum_ADT, dims = 1:20, features = VariableFeatures(object = Ileum_ADT),
+                           k.param = 30, verbose = FALSE, reduction = "unintegrated_pca_adt" )
+
+#direct graph clustering 
+Ileum_ADT <- FindClusters(Ileum_ADT, resolution = 2,  graph.name = 'ADT_snn', verbose = FALSE, cluster.name = "unintegrated_ADT_clusters", group.singletons = F)
+Ileum_ADT[['ADT']] <-  JoinLayers(Ileum_ADT[['ADT']])
+Ileum_ADT <- RunUMAP(object = Ileum_ADT, assay = "ADT", features = prots, 
+                      n.neighbors = 30,  verbose = FALSE, reduction.name = "umap.ADT.unintegrated")
+
+DimPlot(Ileum_ADT, reduction = "umap.ADT.unintegrated", group.by = c("unintegrated_ADT_clusters", "Tissue", "InfectionStatus"),
+  combine = FALSE, label.size = 2, label = TRUE)
+```
+#Integrate the ADT data -
+```{r}
+DefaultAssay(MLN_ADT) <- "ADT"
+MLN_ADT[["ADT"]] <- split(MLN_ADT[["ADT"]], f = MLN_ADT$InfectionStatus)
+MLN_ADT <- IntegrateLayers(
+  object = MLN_ADT, method = RPCAIntegration, features = prots, 
+  orig.reduction = "unintegrated_pca_adt", new.reduction = "integrated.ADT.rpca", verbose = TRUE)
+MLN_ADT <- FindNeighbors(MLN_ADT, reduction = "integrated.ADT.rpca", dims = 1:20)
+MLN_ADT <- FindClusters(MLN_ADT, resolution = 2, cluster.name = "adt_integration_clusters", group.singletons = F)
+MLN_ADT <- RunUMAP(MLN_ADT, reduction = "integrated.ADT.rpca", dims = 1:20, reduction.name = "umap.integrated.ADT")
+MLN_ADT_umap_int <- DimPlot(MLN_ADT, reduction = "umap.integrated.ADT", group.by = c("adt_integration_clusters", "Tissue", "InfectionStatus"),combine = FALSE, label.size = 2)
+MLN_ADT_umap_int
+
+DimPlot(MLN_ADT, reduction = "umap.integrated.ADT", group.by = c("adt_integration_clusters"),combine = TRUE, label = T, label.size = 3) + NoLegend()
+
+ggsave("MLN_ADT_based_integrated_UMAP_ADT_clusters.png",plot = last_plot(), device = NULL,
+  path = images,scale = 1, width = 5, height = 5,  units = c("in"),dpi = 600, limitsize = TRUE, bg = NULL)
+```
+
+```{r}
+DefaultAssay(Ileum_ADT) <- "ADT"
+Ileum_ADT[["ADT"]] <- split(Ileum_ADT[["ADT"]], f = Ileum_ADT$InfectionStatus)
+Ileum_ADT <- IntegrateLayers(
+  object = Ileum_ADT, method = RPCAIntegration, features = prots, 
+  orig.reduction = "unintegrated_pca_adt", new.reduction = "integrated.ADT.rpca", verbose = TRUE)
+Ileum_ADT <- FindNeighbors(Ileum_ADT, reduction = "integrated.ADT.rpca", dims = 1:20)
+Ileum_ADT <- FindClusters(Ileum_ADT, resolution = 2, cluster.name = "adt_integration_clusters", group.singletons = F)
+Ileum_ADT <- RunUMAP(Ileum_ADT, reduction = "integrated.ADT.rpca", dims = 1:20, reduction.name = "umap.integrated.ADT")
+Ileum_ADT_umap_int <- DimPlot(Ileum_ADT, reduction = "umap.integrated.ADT", group.by = c("adt_integration_clusters", "Tissue", "InfectionStatus"),combine = FALSE, label.size = 2)
+Ileum_ADT_umap_int
+
+DimPlot(Ileum_ADT, reduction = "umap.integrated.ADT", group.by = c("adt_integration_clusters"),combine = TRUE, label = T, label.size = 3) + NoLegend()
+
+ggsave("Ileum_ADT_based_integrated_UMAP_ADT_clusters.png",plot = last_plot(), device = NULL,
+  path = images,scale = 1, width = 5, height = 5,  units = c("in"),dpi = 600, limitsize = TRUE, bg = NULL)
+```
+
+#Manually evaluate Protein Clusters
+```{r}
+DefaultAssay(MLN_ADT) <- "ADT"
+
+rownames(MLN_ADT)
+FeaturePlot_scCustom(MLN_ADT, "CD4", reduction = "umap.integrated.ADT") + ggtitle("CD4 Protein") 
+FeaturePlot_scCustom(MLN_ADT, "CD8a", reduction = "umap.integrated.ADT") + ggtitle("CD8a Protein")
+FeaturePlot_scCustom(MLN_ADT, "CD19", reduction = "umap.integrated.ADT")+ ggtitle("CD19 Protein")
+FeaturePlot_scCustom(MLN_ADT, "IgD", reduction = "umap.integrated.ADT")+ ggtitle("IgD Protein")
+FeaturePlot_scCustom(MLN_ADT, "TCR.Bchain", reduction = "umap.integrated.ADT")+ ggtitle("TCRb Protein")
+FeaturePlot_scCustom(MLN_ADT, "Ly.6C", reduction = "umap.integrated.ADT")+ ggtitle("Ly6C Protein")
+FeaturePlot_scCustom(MLN_ADT, "NK.1.1", reduction = "umap.integrated.ADT")+ ggtitle("NK1.1 Protein")
+FeaturePlot_scCustom(MLN_ADT, "CD200", reduction = "umap.integrated.ADT")
+FeaturePlot_scCustom(MLN_ADT, "CD31", reduction = "umap.integrated.ADT")
+FeaturePlot_scCustom(MLN_ADT, "CD49b", reduction = "umap.integrated.ADT")+ ggtitle("CD49b Protein")
+FeaturePlot_scCustom(MLN_ADT, "CD49f", reduction = "umap.integrated.ADT")+ ggtitle("CD49f Protein") 
+FeaturePlot_scCustom(MLN_ADT, "CD79b", reduction = "umap.integrated.ADT")+ ggtitle("CD79b(Igb) Protein")
+FeaturePlot_scCustom(MLN_ADT, "CX3CR1", reduction = "umap.integrated.ADT")+ ggtitle("CX3CR1 Protein")
+FeaturePlot_scCustom(MLN_ADT, "CD3", reduction = "umap.integrated.ADT")+ ggtitle("CD3 Protein")
+FeaturePlot_scCustom(MLN_ADT, "CD5", reduction = "umap.integrated.ADT")+ ggtitle("CD5 Protein")	
+FeaturePlot_scCustom(MLN_ADT, "CD11b", reduction = "umap.integrated.ADT")+ ggtitle("CD11b Protein")
+FeaturePlot_scCustom(MLN_ADT, "XCR1", reduction = "umap.integrated.ADT")+ ggtitle("XCR1 Protein")	
+FeaturePlot_scCustom(MLN_ADT, "CD11c", reduction = "umap.integrated.ADT")+ ggtitle("CD11c Protein")	
+FeaturePlot_scCustom(MLN_ADT, "CD172a", reduction = "umap.integrated.ADT")+ ggtitle("CD172a(SIRPa) Protein")	
+```
+```{r}
+FeaturePlot_scCustom(Ileum_ADT, "CD4", reduction = "umap.integrated.ADT") + ggtitle("CD4 Protein") 
+FeaturePlot_scCustom(Ileum_ADT, "CD8a", reduction = "umap.integrated.ADT") + ggtitle("CD8a Protein")
+FeaturePlot_scCustom(Ileum_ADT, "CD19", reduction = "umap.integrated.ADT")+ ggtitle("CD19 Protein")
+FeaturePlot_scCustom(Ileum_ADT, "IgD", reduction = "umap.integrated.ADT")+ ggtitle("IgD Protein")
+FeaturePlot_scCustom(Ileum_ADT, "TCR.Bchain", reduction = "umap.integrated.ADT")+ ggtitle("TCRb Protein")
+FeaturePlot_scCustom(Ileum_ADT, "Ly.6C", reduction = "umap.integrated.ADT")+ ggtitle("Ly6C Protein")
+FeaturePlot_scCustom(Ileum_ADT, "NK.1.1", reduction = "umap.integrated.ADT")+ ggtitle("NK1.1 Protein")
+FeaturePlot_scCustom(Ileum_ADT, "CD200", reduction = "umap.integrated.ADT")
+FeaturePlot_scCustom(Ileum_ADT, "CD31", reduction = "umap.integrated.ADT")
+FeaturePlot_scCustom(Ileum_ADT, "CD49b", reduction = "umap.integrated.ADT")+ ggtitle("CD49b Protein")
+FeaturePlot_scCustom(Ileum_ADT, "CD49f", reduction = "umap.integrated.ADT")+ ggtitle("CD49f Protein") 
+FeaturePlot_scCustom(Ileum_ADT, "CD79b", reduction = "umap.integrated.ADT")+ ggtitle("CD79b(Igb) Protein")
+FeaturePlot_scCustom(Ileum_ADT, "CX3CR1", reduction = "umap.integrated.ADT")+ ggtitle("CX3CR1 Protein")
+FeaturePlot_scCustom(Ileum_ADT, "CD3", reduction = "umap.integrated.ADT")+ ggtitle("CD3 Protein")
+FeaturePlot_scCustom(Ileum_ADT, "CD5", reduction = "umap.integrated.ADT")+ ggtitle("CD5 Protein")	
+FeaturePlot_scCustom(Ileum_ADT, "CD11b", reduction = "umap.integrated.ADT")+ ggtitle("CD11b Protein")
+FeaturePlot_scCustom(Ileum_ADT, "XCR1", reduction = "umap.integrated.ADT")+ ggtitle("XCR1 Protein")	
+FeaturePlot_scCustom(Ileum_ADT, "CD11c", reduction = "umap.integrated.ADT")+ ggtitle("CD11c Protein")	
+FeaturePlot_scCustom(Ileum_ADT, "CD172a", reduction = "umap.integrated.ADT")+ ggtitle("CD172a(SIRPa) Protein")	
+
+```
+
+#Combine Data and perform WNN multimodal neighbor analysis and Umap Visualization
+```{r}
+#Add data from the ADT Data set
+MLN_RNA[["ADT"]]<-MLN_ADT[["ADT"]]
+MLN_RNA[["adt.cluster_unintergrated"]] <- MLN_ADT[["unintegrated_ADT_clusters"]]
+MLN_RNA[["unintegrated_pca_adt"]] <- MLN_ADT[["unintegrated_pca_adt"]]
+MLN_RNA[["umap_adt_unintegrated"]] <- MLN_ADT[["umap.ADT.unintegrated"]]
+MLN_RNA[["integrated.ADT.rpca"]] <- MLN_ADT[["integrated.ADT.rpca"]]
+MLN_RNA[["umap.integrated.ADT"]] <- MLN_ADT[["umap.integrated.ADT"]]
+
+MLN_RNA = FindMultiModalNeighbors(
+  MLN_RNA, reduction.list = list("integrated.rpca", "integrated.ADT.rpca"), 
+  dims.list = list(1:25, 1:20), 
+  modality.weight.name = "RNA.weight", 
+  knn.graph.name = "wknn",
+  snn.graph.name = "wsnn",
+  weighted.nn.name = "weighted.nn",
+  verbose = FALSE)
+
+MLN_RNA <- RunUMAP(MLN_RNA, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+MLN_RNA <- FindClusters(MLN_RNA, graph.name = "wsnn",  resolution = 2, verbose = FALSE, cluster.name = "WNN_clusters", n.start = 25, group.singletons = F)
+
+DimPlot(MLN_RNA, reduction = "wnn.umap",   group.by = c( "WNN_clusters", "Tissue", "InfectionStatus"),
+  combine = FALSE, label.size = 2, label = TRUE)
+```
+
+```{r}
+#Evaluate Cluster Genes
+Idents(MLN_RNA) <- "WNN_clusters"
+FeaturePlot_scCustom(MLN_RNA, reduction = "wnn.umap",features = c("Ighd",  "Cd3e", "Cd14", "Cd4", "Ptprc", "Cd8a", "Ly6c1", "Epcam"), raster = F)
+DefaultAssay(MLN_RNA) <- "RNA"
+FeaturePlot_scCustom(MLN_RNA, reduction = "wnn.umap",features = c("Ptprc"), raster = F)
+FeaturePlot_scCustom(MLN_RNA, reduction = "wnn.umap",features = c("Epcam"), raster = F) 
+ggsave("MLN_Epcam_expression_WNNumap.png",plot = last_plot(), device = NULL, path = images,
+  scale = 1, width = 5,height = 5, units = c("in"), dpi = 600, limitsize = TRUE, bg = NULL)
+``` 
+
+
+```{r}
+#Cluster Method #2 Using Monocle
+library(SeuratWrappers)
+ cds <- as.cell_data_set(MLN_RNA, reductions = "wnn.umap",
+  default.reduction = "wnn.umap", graph =  "wsnn", group.by = NULL)
+ 
+reducedDimNames(cds) <- "UMAP"
+cds <-cluster_cells(cds,
+  reduction_method = "UMAP", resolution =  NULL, k = 15, cluster_method =  "leiden",
+  num_iter = 2, partition_qval = 0.25, weight = TRUE, verbose = T )
+```
+
+
+```{r}
+#Visualize clusters Monocle - I don't find the partitions useful and don't believe they make sense  
+p1 <- plot_cells(cds, color_cells_by = "cluster", show_trajectory_graph = FALSE)
+p2 <- plot_cells(cds, color_cells_by = "partition", show_trajectory_graph = FALSE)
+p1|p2 
+
+Seurat_monocle <- as.Seurat(cds, assay = NULL)
+MLN_RNA[["Monocle_clusters"]] <- Seurat_monocle@meta.data$monocle3_clusters
+MLN_RNA[["Monocle_partitions"]] <- Seurat_monocle@meta.data$monocle3_partitions
+DimPlot(MLN_RNA, reduction = "wnn.umap",   group.by = c( "WNN_clusters", "Monocle_clusters"),
+  combine = FALSE, label.size = 2, label = TRUE, raster = F)
+```
+
+```{r}
+#Delete the temporary Seurat monocle object
+remove(Seurat_monocle)
+remove(cds)
+```
+
+```{R}
+#Add data from the ADT Data set
+Ileum_RNA[["ADT"]]<-Ileum_ADT[["ADT"]]
+Ileum_RNA[["adt.cluster_unintergrated"]] <- Ileum_ADT[["unintegrated_ADT_clusters"]]
+Ileum_RNA[["unintegrated_pca_adt"]] <- Ileum_ADT[["unintegrated_pca_adt"]]
+Ileum_RNA[["umap_adt_unintegrated"]] <- Ileum_ADT[["umap.ADT.unintegrated"]]
+Ileum_RNA[["integrated.ADT.rpca"]] <- Ileum_ADT[["integrated.ADT.rpca"]]
+Ileum_RNA[["umap.integrated.ADT"]] <- Ileum_ADT[["umap.integrated.ADT"]]
+
+Ileum_RNA = FindMultiModalNeighbors(
+  Ileum_RNA, reduction.list = list("integrated.rpca", "integrated.ADT.rpca"), 
+  dims.list = list(1:25, 1:20), 
+  modality.weight.name = "RNA.weight", 
+  knn.graph.name = "wknn",
+  snn.graph.name = "wsnn",
+  weighted.nn.name = "weighted.nn",
+  verbose = FALSE)
+
+Ileum_RNA <- RunUMAP(Ileum_RNA, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+Ileum_RNA <- FindClusters(Ileum_RNA, graph.name = "wsnn",  resolution = 2, verbose = FALSE, cluster.name = "WNN_clusters", n.start = 25, group.singletons = F)
+
+DimPlot(Ileum_RNA, reduction = "wnn.umap",   group.by = c( "WNN_clusters", "Tissue", "InfectionStatus"),
+  combine = FALSE, label.size = 2, label = TRUE)
+```
+
+```{r}
+#Evaluate Cluster Genes
+Idents(Ileum_RNA) <- "WNN_clusters"
+FeaturePlot_scCustom(Ileum_RNA, reduction = "wnn.umap",features = c("Ighd",  "Cd3e", "Cd14", "Cd4", "Ptprc", "Cd8a", "Ly6c1", "Epcam"), raster = F)
+DefaultAssay(Ileum_RNA) <- "RNA"
+FeaturePlot_scCustom(Ileum_RNA, reduction = "wnn.umap",features = c("Ptprc"), raster = F)
+FeaturePlot_scCustom(Ileum_RNA, reduction = "wnn.umap",features = c("Epcam"), raster = F) 
+ggsave("Ileum_Epcam_expression_WNNumap.png",plot = last_plot(), device = NULL, path = images,
+  scale = 1, width = 5,height = 5, units = c("in"), dpi = 600, limitsize = TRUE, bg = NULL)
+``` 
+
+
+```{r}
+Ileum_data
+#Cluster Method #2 Using Monocle
+library(SeuratWrappers)
+ cds <- as.cell_data_set(Ileum_RNA, reductions = "wnn.umap",
+  default.reduction = "wnn.umap", graph =  "wsnn", group.by = NULL)
+ 
+reducedDimNames(cds) <- "UMAP"
+cds <-cluster_cells(cds,
+  reduction_method = "UMAP", resolution =  0.00015, k = 15, cluster_method =  "leiden",
+  num_iter = 2, partition_qval = 0.25, weight = TRUE, verbose = T )
+```
+
+
+```{r}
+#Visualize clusters Monocle - I don't find the partitions useful and don't believe they make sense  
+p1 <- plot_cells(cds, color_cells_by = "cluster", show_trajectory_graph = FALSE)
+p2 <- plot_cells(cds, color_cells_by = "partition", show_trajectory_graph = FALSE)
+p1|p2 
+
+Seurat_monocle <- as.Seurat(cds, assay = NULL)
+Ileum_RNA[["Monocle_clusters"]] <- Seurat_monocle@meta.data$monocle3_clusters
+Ileum_RNA[["Monocle_partitions"]] <- Seurat_monocle@meta.data$monocle3_partitions
+DimPlot(Ileum_RNA, reduction = "wnn.umap",   group.by = c( "WNN_clusters", "Monocle_clusters"),
+  combine = FALSE, label.size = 2, label = TRUE, raster = F)
+```
+
+```{r}
+#Delete the temporary Seurat monocle object
+remove(Seurat_monocle)
+remove(cds)
+```
+
+
+#Advanced Quality Control - Cell Cycle Effects and doublet removal
+```{r}
+#Visualize the CEll cycle across the UMAP
+DimPlot(MLN_RNA, reduction = "wnn.umap",   group.by = c( "WNN_clusters", "Monocle_clusters", "Phase"),
+  combine = FALSE, label.size = 2, label = TRUE, raster = F)
+FeaturePlot(MLN_RNA, reduction = "wnn.umap",features = c("Ighd",  "Cd3e", "Cd14", "Cd4", "Ptprc",
+    "Cd8a", "Ms4a1", "Epcam", "Igha"), raster = F)
+
+DimPlot(Ileum_RNA, reduction = "wnn.umap",   group.by = c( "WNN_clusters", "Monocle_clusters", "Phase"),
+  combine = FALSE, label.size = 2, label = TRUE, raster = F)
+FeaturePlot(Ileum_RNA, reduction = "wnn.umap",features = c("Ighd",  "Cd3e", "Cd14", "Cd4", "Ptprc",
+    "Cd8a", "Ms4a1", "Epcam", "Igha"), raster = F)
+```
+
+
+
+
+```{r}
+#Doublet Identification
+MLN_RNA[["RNA"]] <- JoinLayers(MLN_RNA[["RNA"]])
+MLN_RNA.sce <- as.SingleCellExperiment(MLN_RNA, assay = "RNA")
+library(scDblFinder)
+MLN_RNA.sce <- scDblFinder(MLN_RNA.sce, samples="orig.ident", clusters="WNN_clusters")
+RDS <- as.Seurat(MLN_RNA.sce)
+```
+
+```{r}
+#Visualize the results of the doublet call
+table(MLN_RNA.sce$scDblFinder.class) #111793 singlets 15678 Doublets
+DimPlot(RDS, reduction = "WNN.UMAP", group.by = "scDblFinder.class")
+DimPlot(RDS, reduction = "WNN.UMAP", group.by = c("scDblFinder.class", "WNN_clusters_cc"),
+  combine = TRUE, label.size = 3, label = TRUE) + NoLegend()
+DimPlot(RDS, reduction = "WNN.UMAP", group.by = c("scDblFinder.class", "Phase"),
+  combine = TRUE, label.size = 3, label = TRUE) + NoLegend()
+FeaturePlot(RDS, reduction = "WNN.UMAP", features = c("Cd19", "Cd4", "Cd8a") ) #overlapping CD19 and CD8/CD4 demonstrate true doublet call
+```
+
+```{r}
+#Transfer Doublet labels to Seurat object and remove doublets from the data set
+MLN_RNA[["Doublet"]] <-RDS[["scDblFinder.class"]] 
+MLN_RNA[["scDblFinder.weighted"]] <-RDS[["scDblFinder.weighted"]] 
+MLN_RNA[["scDblFinder.score"]] <-RDS[["scDblFinder.score"]]
+MLN_RNA[["scDblFinder.difficulty"]] <-RDS[["scDblFinder.difficulty"]]
+MLN_RNA[["scDblFinder.cxds_score"]] <-RDS[["scDblFinder.cxds_score"]]
+Idents(MLN_RNA) <- "Doublet"
+table(MLN_RNA$Doublet) 
+write.csv(table(MLN_RNA$Doublet), paste0(CSV, "/MLN_Doublet_Calls.csv"))
+MLN_RNA <- subset(x = MLN_RNA, idents = "singlet")
+remove(RDS) 
+remove(MLN_RNA.sce)
+remove(RNA_only)
+table(MLN_RNA$Doublet) 
+```
+
+
+```{r}
+#Doublet Identification
+Ileum_RNA[["RNA"]] <- JoinLayers(Ileum_RNA[["RNA"]])
+Ileum_RNA.sce <- as.SingleCellExperiment(Ileum_RNA, assay = "RNA")
+library(scDblFinder)
+Ileum_RNA.sce <- scDblFinder(Ileum_RNA.sce, samples="orig.ident", clusters="WNN_clusters")
+RDS <- as.Seurat(Ileum_RNA.sce)
+#Visualize the results of the doublet call
+table(Ileum_RNA.sce$scDblFinder.class) #123120 singlets 11535 Doublets
+DimPlot(RDS, reduction = "WNN.UMAP", group.by = "scDblFinder.class")
+DimPlot(RDS, reduction = "WNN.UMAP", group.by = c("scDblFinder.class", "WNN_clusters_cc"),
+  combine = TRUE, label.size = 3, label = TRUE) + NoLegend()
+DimPlot(RDS, reduction = "WNN.UMAP", group.by = c("scDblFinder.class", "Phase"),
+  combine = TRUE, label.size = 3, label = TRUE) + NoLegend()
+FeaturePlot(RDS, reduction = "WNN.UMAP", features = c("Cd19", "Cd4", "Cd8a", "Epcam", "Cd3e") ) #overlapping CD19 and CD8/CD4 demonstrate true doublet call
+```
+
+```{r}
+#Transfer Doublet labels to Seurat object and remove doublets from the data set
+Ileum_RNA[["Doublet"]] <-RDS[["scDblFinder.class"]] 
+Ileum_RNA[["scDblFinder.weighted"]] <-RDS[["scDblFinder.weighted"]] 
+Ileum_RNA[["scDblFinder.score"]] <-RDS[["scDblFinder.score"]]
+Ileum_RNA[["scDblFinder.difficulty"]] <-RDS[["scDblFinder.difficulty"]]
+Ileum_RNA[["scDblFinder.cxds_score"]] <-RDS[["scDblFinder.cxds_score"]]
+Idents(Ileum_RNA) <- "Doublet"
+table(Ileum_RNA$Doublet) 
+write.csv(table(Ileum_RNA$Doublet), paste0(CSV, "/Ileum_Doublet_Calls.csv"))
+Ileum_RNA <- subset(x = Ileum_RNA, idents = "singlet")
+remove(RDS) 
+remove(Ileum_RNA.sce)
+remove(RNA_only)
+table(Ileum_RNA$Doublet) 
+```
+```{r}
+#Save the Cell Numbers 
+write.csv(table(Ileum_RNA$Tissue, Ileum_RNA$orig.ident, Ileum_RNA$InfectionStatus) , paste0(CSV, "/Ileum_Cell_Breakdown.csv"))
+table(Ileum_RNA$Tissue, Ileum_RNA$orig.ident, Ileum_RNA$InfectionStatus) 
+write.csv(table(MLN_RNA$Tissue, MLN_RNA$orig.ident, MLN_RNA$InfectionStatus) , paste0(CSV, "/MLN_Cell_Breakdown.csv"))
+```
+
+#Recluster following doublet removal
+```{r}
+MLN_RNA = FindMultiModalNeighbors(
+  MLN_RNA, reduction.list = list("integrated.rpca", "integrated.ADT.rpca"), 
+  dims.list = list(1:25, 1:20), 
+  modality.weight.name = "RNA.weight", 
+  knn.graph.name = "wknn",
+  snn.graph.name = "wsnn",
+  weighted.nn.name = "weighted.nn",
+  verbose = FALSE)
+
+MLN_RNA <- RunUMAP(MLN_RNA, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP", seed.use = 12, n.neighbors = 30L)
+MLN_RNA <- FindClusters(MLN_RNA, graph.name = "wsnn",  resolution = 2, verbose = FALSE, cluster.name = "WNN_clusters", n.start = 25, group.singletons = F)
+table(MLN_RNA$WNN_clusters)
+DimPlot(MLN_RNA, reduction = "wnn.umap",   group.by = c( "WNN_clusters", "InfectionStatus", "Phase"),
+  combine = FALSE, label.size = 2, label = TRUE)
+```
+
+```{r}
+#Monocle Clustering
+ cds <- as.cell_data_set(
+  MLN_RNA,
+  reductions = "wnn.umap",
+  default.reduction = "wnn.umap",
+  graph =  "wsnn",
+  group.by = NULL)
+ 
+reducedDimNames(cds) <- "UMAP"
+cds <-cluster_cells(
+  cds,
+  reduction_method = "UMAP", 
+  k = 15, cluster_method =  "leiden", resolution = 0.00015,
+  num_iter = 1, partition_qval = 0.25, weight = TRUE, verbose = T )
+```
+
+
+```{r}
+#Visualize clusters Monocle - I don't find the partitions useful and don't believe they make sense  
+p1 <- plot_cells(cds, color_cells_by = "cluster", show_trajectory_graph = FALSE)
+p2 <- plot_cells(cds, color_cells_by = "partition", show_trajectory_graph = FALSE)
+p1|p2 
+
+Seurat_monocle <- as.Seurat(cds, assay = NULL)
+MLN_RNA[["Monocle_clusters"]] <- Seurat_monocle@meta.data$monocle3_clusters
+MLN_RNA[["Monocle_partitions"]] <- Seurat_monocle@meta.data$monocle3_partitions
+DimPlot(MLN_RNA, reduction = "wnn.umap",   group.by = c( "WNN_clusters", "Monocle_clusters"),
+  combine = FALSE, label.size = 2, label = TRUE, raster = F)
+#Delete the temporary Seurat monocle object
+remove(Seurat_monocle)
+remove(cds)
+```
+
+```{r}
+Ileum_RNA = FindMultiModalNeighbors(
+  Ileum_RNA, reduction.list = list("integrated.rpca", "integrated.ADT.rpca"), 
+  dims.list = list(1:25, 1:20), 
+  modality.weight.name = "RNA.weight", 
+  knn.graph.name = "wknn",
+  snn.graph.name = "wsnn",
+  weighted.nn.name = "weighted.nn",
+  verbose = FALSE)
+
+Ileum_RNA <- RunUMAP(Ileum_RNA, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP", seed.use = 12, n.neighbors = 30L)
+Ileum_RNA <- FindClusters(Ileum_RNA, graph.name = "wsnn",  resolution = 2, verbose = FALSE, cluster.name = "WNN_clusters", n.start = 25, group.singletons = F)
+table(Ileum_RNA$WNN_clusters)
+DimPlot(Ileum_RNA, reduction = "wnn.umap",   group.by = c( "WNN_clusters", "Tissue", "InfectionStatus", "Phase"),
+  combine = FALSE, label.size = 2, label = TRUE)
+```
+
+```{r}
+ cds <- as.cell_data_set(
+  Ileum_RNA,
+  reductions = "wnn.umap",
+  default.reduction = "wnn.umap",
+  graph =  "wsnn",
+  group.by = NULL)
+ 
+#Monocle 3 trajectories require cluster partitions. Please run 'cluster_cells' on your cell_data_set object
+reducedDimNames(cds) <- "UMAP"
+cds <-cluster_cells(
+  cds,
+  reduction_method = "UMAP", 
+  k = 15, cluster_method =  "leiden", resolution = 0.00015,
+  num_iter = 1, partition_qval = 0.25, weight = TRUE, verbose = T )
+```
+
+
+```{r}
+#Visualize clusters Monocle - I don't find the partitions useful and don't believe they make sense  
+p1 <- plot_cells(cds, color_cells_by = "cluster", show_trajectory_graph = FALSE)
+p2 <- plot_cells(cds, color_cells_by = "partition", show_trajectory_graph = FALSE)
+p1|p2 
+
+Seurat_monocle <- as.Seurat(cds, assay = NULL)
+Ileum_RNA[["Monocle_clusters"]] <- Seurat_monocle@meta.data$monocle3_clusters
+Ileum_RNA[["Monocle_partitions"]] <- Seurat_monocle@meta.data$monocle3_partitions
+DimPlot(Ileum_RNA, reduction = "wnn.umap",   group.by = c( "WNN_clusters", "Monocle_clusters"),
+  combine = FALSE, label.size = 2, label = TRUE, raster = F)
+#Delete the temporary Seurat monocle object
+remove(Seurat_monocle)
+remove(cds)
+```
+
+
+
+#Regression of Cell cycle # not performed 
+```{r}
+
+
+MLN[["RNA"]]
+RNA_only <- MLN[["RNA"]]
+RNA_only <-CreateSeuratObject(RNA_only)
+RNA_only[["RNA"]] <- as(RNA_only[["RNA"]], "Assay")
+RNA_only[["S.Score"]] <- MLN[["S.Score"]]
+RNA_only[["G2M.Score"]] <- MLN[["G2M.Score"]]
+
+DefaultAssay(RNA_only) <- "RNA"
+options(future.globals.maxSize = 35000 * 1024^2)
+plan(strategy =  "multisession", workers = 50 )
+all.genes <- rownames(MLN[["RNA"]]) # 50 workers, min cells to block = 5000, blcok size = 110000, cells = ~110000, global.size = 35000 * 1024^2
+RNA_only<-  ScaleData(RNA_only, vars.to.regress = c("S.Score", "G2M.Score"), features = all.genes, assay = "RNA", verbose = T, 
+                      block.size = 11000, min.cells.to.block = 5000)
+#save.image(file="/data/hartandrew/MIST/SingleCell/WorkingAnalysis.RData") 
+#Saved here 
+RNA_only[['RNA']] <-  split(x = RNA_only[['RNA']], f = RNA_only$InfectionStatus)
+RNA_only <- RunPCA(RNA_only, verbose = FALSE, reduction.name = "unintegrated_RNA_pca_cc")
+DimPlot(RNA_only, reduction = "unintegrated_RNA_pca_cc" )
+DimPlot(MLN, reduction = "unintegrated_RNA_pca" )
+RNA_only <- Convert_Assay(seurat_object = RNA_only, convert_to = "v5")
+RNA_only[['RNA']] <-  split(x = RNA_only[['RNA']], f = RNA_only$InfectionStatus)
+DefaultAssay(RNA_only)
+RNA_only <- IntegrateLayers(
+  object = RNA_only, method = RPCAIntegration, assay = "RNA", features = VariableFeatures(RNA_only, nfeatures = 3000),
+  orig.reduction = "unintegrated_RNA_pca_cc", new.reduction = "integrated.rpca_cc",
+  verbose = T)
+RNA_only <- FindNeighbors(RNA_only, reduction = "integrated.rpca_cc", dims = 1:25)
+RNA_only <- FindClusters(RNA_only, resolution = 2, cluster.name = "rpca_integration_clusters_cc", group.singletons = F)
+RNA_only <- RunUMAP(RNA_only, reduction = "integrated.rpca_cc", dims = 1:25, reduction.name = "umap.rpca_cc")
+#Transfer the previous phase ID 
+RNA_only[["Phase"]] <- MLN[["Phase"]]
+q1<- DimPlot(RNA_only, reduction = "umap.rpca_cc", group.by = c( "Phase"), combine = TRUE, label.size = 4, label = TRUE)+ NoLegend()
+q2 <- DimPlot(MLN, reduction = "umap.rpca", group.by = c("Phase"), combine = TRUE, label.size = 4, label = TRUE) + NoLegend()
+q1 | q2
+
+#There is slightly less clustering based on cell cycle in the two plots 
+MLN[["integrated.rpca_cc"]] <- RNA_only[["integrated.rpca_cc"]]
+
+MLN = FindMultiModalNeighbors(
+  MLN, reduction.list = list("integrated.rpca_cc", "integrated.ADT.rpca"), 
+  dims.list = list(1:25, 1:20), 
+  modality.weight.name = "RNA.weight", 
+  knn.graph.name = "wknn_cc",
+  snn.graph.name = "wsnn_cc",
+  weighted.nn.name = "weighted.nn_cc",
+  verbose = FALSE)
+
+#compare clusters and Umaps before and after CC regression
+DefaultAssay(MLN) <- "RNA"
+MLN <- RunUMAP(MLN, nn.name = "weighted.nn_cc", reduction.name = "wnn.umap_cc", reduction.key = "wnnUMAPcc_")
+MLN <- FindClusters(MLN, graph.name = "wsnn_cc",  resolution = 2, verbose = FALSE, cluster.name = "WNN_clusters_cc", n.start = 25, group.singletons = F)
+
+q1 <- DimPlot(MLN, reduction = "wnn.umap_cc",   group.by = c( "WNN_clusters_cc"),
+  combine = T, label.size = 2, label = TRUE) 
+q2 <- DimPlot(MLN, reduction = "wnn.umap",   group.by = c("WNN_clusters"),
+  combine = T, label.size = 2, label = TRUE) + NoLegend()
+q1 | q2
+
+FeaturePlot(MLN, reduction = "wnn.umap_cc", features = "CD200" )
+remove(RNA_only)
+
+#Monocle Clusters
+ cds <- as.cell_data_set(
+  MLN,
+  reductions = "wnn.umap_cc",
+  default.reduction = "wnn.umap_cc",
+  graph =  "wsnn",
+  group.by = NULL)
+ 
+reducedDimNames(cds) <- "UMAP"
+cds <-cluster_cells( cds, reduction_method = "UMAP", k = 15, cluster_method =  "leiden", resolution = 0.00015,
+  num_iter = 1, partition_qval = 0.25, weight = TRUE, verbose = T )
+#Visualize clusters Monocle - I don't find the partitions useful and don't believe they make sense  
+ plot_cells(cds, color_cells_by = "cluster", show_trajectory_graph = FALSE)
+
+Seurat_monocle <- as.Seurat(cds, assay = NULL)
+MLN[["Monocle_clusters_cc"]] <- Seurat_monocle@meta.data$monocle3_clusters
+MLN[["Monocle_partitions_cc"]] <- Seurat_monocle@meta.data$monocle3_partitions
+DimPlot(MLN, reduction = "wnn.umap",   group.by = c( "WNN_clusters", "Monocle_clusters_cc"),
+  combine = FALSE, label.size = 2, label = TRUE, raster = F)
+#Delete the temporary Seurat monocle object
+remove(Seurat_monocle)
+remove(cds)
+```
+
+```{r}
+
+#Optional Removal and regression of Cell cycle. As of 09-09-2024 I am not performing this step on the Ileum 
+
+Ileum_RNA[["RNA"]]
+RNA_only <- Ileum_RNA[["RNA"]]
+RNA_only <-CreateSeuratObject(RNA_only)
+RNA_only[["RNA"]] <- as(RNA_only[["RNA"]], "Assay")
+RNA_only[["S.Score"]] <- Ileum_RNA[["S.Score"]]
+RNA_only[["G2M.Score"]] <- Ileum_RNA[["G2M.Score"]]
+
+DefaultAssay(RNA_only) <- "RNA"
+options(future.globals.maxSize = 35000 * 1024^2)
+plan(strategy =  "multisession", workers = 20 )
+RNA_only<-  ScaleData(RNA_only, vars.to.regress = c("S.Score", "G2M.Score"), features = all.genes, assay = "RNA", verbose = T, 
+                      block.size = 11000, min.cells.to.block = 5000)
+save.image(file="/data/hartandrew/MIST/SingleCell/WorkingAnalysis.RData") 
+#Saved here 
+RNA_only <- RunPCA(RNA_only, verbose = FALSE, reduction.name = "unintegrated_RNA_pca_cc")
+DimPlot(RNA_only, reduction = "unintegrated_RNA_pca_cc" )
+DimPlot(Ileum_RNA, reduction = "unintegrated_RNA_pca" )
+RNA_only <- Convert_Assay(seurat_object = RNA_only, convert_to = "v5")
+RNA_only[['RNA']] <-  split(x = RNA_only[['RNA']], f = RNA_only$orig.ident)
+DefaultAssay(RNA_only)
+RNA_only <- IntegrateLayers(
+  object = RNA_only, method = RPCAIntegration, assay = "RNA", features = VariableFeatures(RNA_only, nfeatures = 3000),
+  orig.reduction = "unintegrated_RNA_pca_cc", new.reduction = "integrated.rpca_cc",
+  verbose = T)
+RNA_only <- FindNeighbors(RNA_only, reduction = "integrated.rpca_cc", dims = 1:25)
+RNA_only <- FindClusters(RNA_only, resolution = 2, cluster.name = "rpca_integration_clusters_cc", group.singletons = F)
+RNA_only <- RunUMAP(RNA_only, reduction = "integrated.rpca_cc", dims = 1:25, reduction.name = "umap.rpca_cc")
+#Transfer the previous phase ID 
+RNA_only[["Phase"]] <- Ileum_RNA[["Phase"]]
+q1<- DimPlot(RNA_only, reduction = "umap.rpca_cc", group.by = c( "Phase"), combine = TRUE, label.size = 4, label = TRUE)+ NoLegend()
+q2 <- DimPlot(Ileum_RNA, reduction = "umap.rpca", group.by = c("Phase"), combine = TRUE, label.size = 4, label = TRUE) + NoLegend()
+q1 | q2
+
+#There is slightly less clustering based on cell cycle in the two plots 
+Ileum_RNA[["integrated.rpca_cc"]] <- RNA_only[["integrated.rpca_cc"]]
+
+Ileum_RNA = FindMultiModalNeighbors(
+  Ileum_RNA, reduction.list = list("integrated.rpca_cc", "integrated.ADT.rpca"), 
+  dims.list = list(1:25, 1:20), 
+  modality.weight.name = "RNA.weight", 
+  knn.graph.name = "wknn_cc",
+  snn.graph.name = "wsnn_cc",
+  weighted.nn.name = "weighted.nn_cc",
+  verbose = FALSE)
+
+#compare clusters and Umaps before and after CC regression
+DefaultAssay(Ileum_RNA) <- "RNA"
+Ileum_RNA <- RunUMAP(Ileum_RNA, nn.name = "weighted.nn_cc", reduction.name = "wnn.umap_cc", reduction.key = "wnnUMAPcc_")
+Ileum_RNA <- FindClusters(Ileum_RNA, graph.name = "wsnn_cc",  resolution = 2, verbose = FALSE, cluster.name = "WNN_clusters_cc", n.start = 25, group.singletons = F)
+
+q1 <- DimPlot(Ileum_RNA, reduction = "wnn.umap_cc",   group.by = c( "WNN_clusters_cc"),
+  combine = T, label.size = 2, label = TRUE) 
+q2 <- DimPlot(Ileum_RNA, reduction = "wnn.umap",   group.by = c("WNN_clusters"),
+  combine = T, label.size = 2, label = TRUE) + NoLegend()
+q1 | q2
+
+FeaturePlot(Ileum_RNA, reduction = "wnn.umap_cc", features = "CD200" )
+remove(RNA_only)
+```
+
+#Save Data 
+```{r}
+library(SeuratDisk)
+MLN_RNA[["RNA"]] <-  as(MLN_RNA[["RNA"]], "Assay")
+MLN_RNA[["ADT"]] <-  as(MLN_RNA[["ADT"]], "Assay")
+SaveH5Seurat(MLN_RNA, filename = "/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/MLN_clustered.h5Seurat", overwrite = T)
+Ileum_RNA[["RNA"]] <-  as(Ileum_RNA[["RNA"]], "Assay")
+Ileum_RNA[["ADT"]] <-  as(Ileum_RNA[["ADT"]], "Assay")
+SaveH5Seurat(Ileum_RNA, filename = "/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/Ileum_clustered.h5Seurat", overwrite = T)
+
+```

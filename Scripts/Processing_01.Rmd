@@ -1,0 +1,3336 @@
+---
+title: "SingleCell_Analysis"
+author: "AndrewHart"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+##Load the Libraries----
+```{r, warning=FALSE, error=FALSE}
+library(Seurat)
+library(Signac)
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(data.table)
+library(cowplot)
+library(scCustomize)
+library(forcats)
+library(ggbreak)
+library(presto)
+library(ggforce)
+library(SingleR)
+library(celldex)
+library(harmony)
+#library(Azimuth)
+library(glmGamPoi)
+library(future)
+library(dsb)
+library(RColorBrewer)
+library(monocle3)
+library(gt)
+options(future.globals.maxSize = 5000 * 1024^2)
+```
+
+#directory set up
+```{r}
+getwd() #/home/hartandrew
+setwd("/data/hartandrew/Projects/MIST/MIST_Analysis")
+out <- "/data/hartandrew/Projects/MIST/MIST_Analysis/Output"
+version <- "/data/hartandrew/Projects/MIST/MIST_Analysis/Version"
+images <- "/data/hartandrew/Projects/MIST/MIST_Analysis/Images"
+CSV <- "/data/hartandrew/Projects/MIST/MIST_Analysis/CSV"
+```
+
+
+
+
+```{r setup}
+knitr::opts_knit$set(root.dir = '/data/hartandrew/MIST/SingleCell')
+```
+
+## Load Samples, Filter Cells, Normalize ADT data for each sample
+#CHMI2482_MLN
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_183/MIST2482_MLN/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_183/MIST2482_MLN/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI2482_MLN = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI2482_MLN$drop.class = ifelse(rownames(md_CHMI2482_MLN) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI2482_MLN = md_CHMI2482_MLN[md_CHMI2482_MLN$rna.size > 0 & md_CHMI2482_MLN$prot.size > 0, ]
+
+cellmd = md_CHMI2482_MLN[md_CHMI2482_MLN$drop.class == 'cell', ]
+
+# filter drops with + / - 2.5 median absolute deviations from the median library size
+rna.mult = (2.5*mad(cellmd$rna.size))
+prot.mult = (2.5*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI2482_MLN = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI2482_MLN)
+
+ggplot(md_CHMI2482_MLN, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+ggplot(md_CHMI2482_MLN, aes(x = log10(n.gene), y = rna.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+background_drops = rownames(
+  md_CHMI2482_MLN[ 
+      md_CHMI2482_MLN$prot.size < 3 & 
+      md_CHMI2482_MLN$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI2482_MLN])
+cell.rna.raw = rna[ ,qc_cells_CHMI2482_MLN]
+cellmd_filt = cellmd[qc_cells_CHMI2482_MLN, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+isotype.controls = c("Isotype_RTK4530", "Isotype_HTK888", 
+                     "Isotype_RTK2071", "Isotype_RTK2758", "Isotype_MOPC.173", "Isotype_MOPC.21", "Isotype_MPC.11")
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI2482_MLN = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd_filt,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI2482_MLN[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI2482_MLN
+rownames(CHMI2482_MLN[["ADT"]])
+FeatureScatter(CHMI2482_MLN, feature1 = "CD19", feature2 = "CD8a")
+FeatureScatter(CHMI2482_MLN, feature1 = "CD45R-B220", feature2 = "CD19", pt.size = 0.5)
+
+
+feats <- c("nFeature_RNA","nCount_RNA","mt.prop")
+VlnPlot(CHMI2482_MLN, group.by= "orig.ident", features = feats, pt.size = 0.1, combine = T, ncol = 3,cols = "#FB20FE" ) + NoLegend()
+
+ggsave("CHMI2482_MLN_RNA_QC_violins.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 7,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+
+ggplot(as.data.frame(CHMI2482_MLN@meta.data), aes(x = nFeature_RNA, y = nCount_RNA )) + geom_point()+ 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + theme_bw() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) 
+```
+
+
+
+#CHMI2482_LP
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_183/MIST2482_LP/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_183/MIST2482_LP/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI2482_LP = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI2482_LP$drop.class = ifelse(rownames(md_CHMI2482_LP) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI2482_LP = md_CHMI2482_LP[md_CHMI2482_LP$rna.size > 0 & md_CHMI2482_LP$prot.size > 0, ]
+
+cellmd = md_CHMI2482_LP[md_CHMI2482_LP$drop.class == 'cell', ]
+
+# filter drops with + / - 3 median absolute deviations from the median library size
+# I question these filters - The 
+rna.mult = (2.5*mad(cellmd$rna.size))
+prot.mult = (2.5*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI2482_LP = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI2482_LP)
+
+ggplot(md_CHMI2482_LP, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+background_drops = rownames(
+  md_CHMI2482_LP[ md_CHMI2482_LP$prot.size > 1.5 & 
+      md_CHMI2482_LP$prot.size < 3 & 
+      md_CHMI2482_LP$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI2482_LP])
+cell.rna.raw = rna[ ,qc_cells_CHMI2482_LP]
+cellmd_filt = cellmd[qc_cells_CHMI2482_LP, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI2482_LP = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd_filt,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI2482_LP[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI2482_LP
+rownames(CHMI2482_LP[["ADT"]])
+FeatureScatter(CHMI2482_LP, feature1 = "CD4", feature2 = "CD8a")
+
+feats <- c("nFeature_RNA","nCount_RNA","mt.prop")
+VlnPlot(CHMI2482_LP, group.by= "orig.ident", features = feats, pt.size = 0.1, combine = T, ncol = 3,cols = "#FB20FE" ) + NoLegend()
+
+ggsave("CHMI2482_LP_RNA_QC_violins.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 7,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+
+ggplot(as.data.frame(CHMI2482_LP@meta.data), aes(x = nFeature_RNA, y = nCount_RNA )) + geom_point()+ 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + theme_bw() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) 
+```
+
+
+#CHMI2482_IEL
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_183/MIST2482_IEL/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_183/MIST2482_IEL/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI2482_IEL = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI2482_IEL$drop.class = ifelse(rownames(md_CHMI2482_IEL) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI2482_IEL = md_CHMI2482_IEL[md_CHMI2482_IEL$rna.size > 0 & md_CHMI2482_IEL$prot.size > 0, ]
+
+cellmd = md_CHMI2482_IEL[md_CHMI2482_IEL$drop.class == 'cell', ]
+
+# filter drops with + / - 3 median absolute deviations from the median library size
+rna.mult = (2.5*mad(cellmd$rna.size))
+prot.mult = (2.5*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI2482_IEL = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI2482_IEL)
+
+ggplot(md_CHMI2482_IEL, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+ggplot(md_CHMI2482_IEL, aes(x = log10(n.gene), y = rna.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+background_drops = rownames(
+  md_CHMI2482_IEL[ md_CHMI2482_IEL$prot.size > 1.5 & 
+      md_CHMI2482_IEL$prot.size < 3 & 
+      md_CHMI2482_IEL$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI2482_IEL])
+cell.rna.raw = rna[ ,qc_cells_CHMI2482_IEL]
+cellmd_filt = cellmd[qc_cells_CHMI2482_IEL, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI2482_IEL = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd_filt,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI2482_IEL[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI2482_IEL
+rownames(CHMI2482_IEL[["ADT"]])
+FeatureScatter(CHMI2482_IEL, feature1 = "CD4", feature2 = "CD8a")
+
+feats <- c("nFeature_RNA","nCount_RNA","mt.prop")
+VlnPlot(CHMI2482_IEL, group.by= "orig.ident", features = feats, pt.size = 0.1, combine = T, ncol = 3,cols = "#FB20FE" ) + NoLegend()
+
+ggsave("CHMI2482_IEL_RNA_QC_violins.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 7,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+
+ggplot(as.data.frame(CHMI2482_IEL@meta.data), aes(x = nFeature_RNA, y = nCount_RNA )) + geom_point()+ 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + theme_bw() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) 
+
+```
+
+#CHMI2489_MLN
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_183/MIST2489_MLN/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_183/MIST2489_MLN/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI2489_MLN = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI2489_MLN$drop.class = ifelse(rownames(md_CHMI2489_MLN) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI2489_MLN = md_CHMI2489_MLN[md_CHMI2489_MLN$rna.size > 0 & md_CHMI2489_MLN$prot.size > 0, ]
+
+cellmd = md_CHMI2489_MLN[md_CHMI2489_MLN$drop.class == 'cell', ]
+
+# filter drops with + / - 3 median absolute deviations from the median library size
+rna.mult = (2.5*mad(cellmd$rna.size))
+prot.mult = (2.5*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI2489_MLN = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI2489_MLN)
+
+ggplot(md_CHMI2489_MLN, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+ggplot(md_CHMI2489_MLN, aes(x = log10(n.gene), y = rna.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+background_drops = rownames(
+  md_CHMI2489_MLN[ md_CHMI2489_MLN$prot.size > 1.5 & 
+      md_CHMI2489_MLN$prot.size < 3 & 
+      md_CHMI2489_MLN$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI2489_MLN])
+cell.rna.raw = rna[ ,qc_cells_CHMI2489_MLN]
+cellmd_filt = cellmd[qc_cells_CHMI2489_MLN, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI2489_MLN = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd_filt,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI2489_MLN[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI2489_MLN
+rownames(CHMI2489_MLN[["ADT"]])
+FeatureScatter(CHMI2489_MLN, feature1 = "CD4", feature2 = "CD8a")
+
+
+feats <- c("nFeature_RNA","nCount_RNA","mt.prop")
+VlnPlot(CHMI2489_MLN, group.by= "orig.ident", features = feats, pt.size = 0.1, combine = T, ncol = 3,cols = "#FB20FE" ) + NoLegend()
+
+ggsave("CHMI2489_MLN_RNA_QC_violins.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 7,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+
+ggplot(as.data.frame(CHMI2489_MLN@meta.data), aes(x = nFeature_RNA, y = nCount_RNA )) + geom_point()+ 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + theme_bw() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) 
+
+```
+
+#CHMI2489_LP
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_183/MIST2489_LP/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_183/MIST2489_LP/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI2489_LP = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI2489_LP$drop.class = ifelse(rownames(md_CHMI2489_LP) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI2489_LP = md_CHMI2489_LP[md_CHMI2489_LP$rna.size > 0 & md_CHMI2489_LP$prot.size > 0, ]
+
+cellmd = md_CHMI2489_LP[md_CHMI2489_LP$drop.class == 'cell', ]
+
+# filter drops with + / - 3 median absolute deviations from the median library size
+rna.mult = (2.5*mad(cellmd$rna.size))
+prot.mult = (2.5*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI2489_LP = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI2489_LP)
+
+ggplot(md_CHMI2489_LP, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+ggplot(md_CHMI2489_LP, aes(x = log10(n.gene), y = rna.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+background_drops = rownames(
+  md_CHMI2489_LP[ md_CHMI2489_LP$prot.size > 1.5 & 
+      md_CHMI2489_LP$prot.size < 3 & 
+      md_CHMI2489_LP$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI2489_LP])
+cell.rna.raw = rna[ ,qc_cells_CHMI2489_LP]
+cellmd_filt = cellmd[qc_cells_CHMI2489_LP, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI2489_LP = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd_filt,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI2489_LP[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI2489_LP
+rownames(CHMI2489_LP[["ADT"]])
+FeatureScatter(CHMI2489_LP, feature1 = "CD4", feature2 = "CD8a")
+feats <- c("nFeature_RNA","nCount_RNA","mt.prop")
+VlnPlot(CHMI2489_LP, group.by= "orig.ident", features = feats, pt.size = 0.1, combine = T, ncol = 3,cols = "#FB20FE" ) + NoLegend()
+
+ggsave("CHMI2489_LP_RNA_QC_violins.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 7,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+
+ggplot(as.data.frame(CHMI2489_LP@meta.data), aes(x = nFeature_RNA, y = nCount_RNA )) + geom_point()+ 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + theme_bw() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) 
+
+```
+
+
+#CHMI2489_IEL
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_183/MIST2489_IEL/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_183/MIST2489_IEL/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI2489_IEL = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI2489_IEL$drop.class = ifelse(rownames(md_CHMI2489_IEL) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI2489_IEL = md_CHMI2489_IEL[md_CHMI2489_IEL$rna.size > 0 & md_CHMI2489_IEL$prot.size > 0, ]
+
+cellmd = md_CHMI2489_IEL[md_CHMI2489_IEL$drop.class == 'cell', ]
+
+# filter drops with + / - 3 median absolute deviations from the median library size
+rna.mult = (2.5*mad(cellmd$rna.size))
+prot.mult = (2.5*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI2489_IEL = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI2489_IEL)
+
+ggplot(md_CHMI2489_IEL, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+ggplot(md_CHMI2489_IEL, aes(x = log10(n.gene), y = rna.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+background_drops = rownames(
+  md_CHMI2489_IEL[ md_CHMI2489_IEL$prot.size > 1.5 & 
+      md_CHMI2489_IEL$prot.size < 3 & 
+      md_CHMI2489_IEL$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI2489_IEL])
+cell.rna.raw = rna[ ,qc_cells_CHMI2489_IEL]
+cellmd_filt = cellmd[qc_cells_CHMI2489_IEL, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI2489_IEL = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd_filt,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI2489_IEL[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI2489_IEL
+rownames(CHMI2489_IEL[["ADT"]])
+FeatureScatter(CHMI2489_IEL, feature1 = "CD4", feature2 = "CD8a")
+
+feats <- c("nFeature_RNA","nCount_RNA","mt.prop")
+VlnPlot(CHMI2489_IEL, group.by= "orig.ident", features = feats, pt.size = 0.1, combine = T, ncol = 3,cols = "#FB20FE" ) + NoLegend()
+
+ggsave("CHMI2489_IEL_RNA_QC_violins.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 7,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+
+ggplot(as.data.frame(CHMI2489_IEL@meta.data), aes(x = nFeature_RNA, y = nCount_RNA )) + geom_point()+ 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + theme_bw() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) 
+
+
+```
+
+#CHMI24109_MLN
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_190/MIST24109_MLN/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_190/MIST24109_MLN/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI24109_MLN = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI24109_MLN$drop.class = ifelse(rownames(md_CHMI24109_MLN) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI24109_MLN = md_CHMI24109_MLN[md_CHMI24109_MLN$rna.size > 0 & md_CHMI24109_MLN$prot.size > 0, ]
+
+cellmd = md_CHMI24109_MLN[md_CHMI24109_MLN$drop.class == 'cell', ]
+
+# filter drops with + / - 3 median absolute deviations from the median library size
+rna.mult = (2.5*mad(cellmd$rna.size))
+prot.mult = (2.5*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI24109_MLN = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI24109_MLN)
+
+ggplot(md_CHMI24109_MLN, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+ggplot(md_CHMI24109_MLN, aes(x = log10(n.gene), y = rna.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+
+background_drops = rownames(
+  md_CHMI24109_MLN[ md_CHMI24109_MLN$prot.size > 1.5 & 
+      md_CHMI24109_MLN$prot.size < 3 & 
+      md_CHMI24109_MLN$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI24109_MLN])
+cell.rna.raw = rna[ ,qc_cells_CHMI24109_MLN]
+cellmd_filt = cellmd[qc_cells_CHMI24109_MLN, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI24109_MLN = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd_filt,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI24109_MLN[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI24109_MLN
+rownames(CHMI24109_MLN[["ADT"]])
+
+FeatureScatter(CHMI24109_MLN, feature1 = "CD45R-B220", feature2 = "CD19", pt.size = 0.5, cols = "#FB20FE")
+ggsave(
+  "CHMI24109_MLN_ADT_B220xCD19.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 5,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+FeatureScatter(CHMI24109_MLN, feature1 = "CD45R-B220", feature2 = "CD8a", pt.size = 0.5, cols = "#FB20FE")
+ggsave(
+  "CHMI24109_MLN_ADT_B220xCD8a.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 5,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+
+
+feats <- c("nFeature_RNA","nCount_RNA","mt.prop")
+VlnPlot(CHMI24109_MLN, group.by= "orig.ident", features = feats, pt.size = 0.1, combine = T, ncol = 3,cols = "#FB20FE" ) + NoLegend()
+
+ggsave("CHMI24109_MLN_RNA_QC_violins.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 7,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+
+ggplot(as.data.frame(CHMI24109_MLN@meta.data), aes(x = nFeature_RNA, y = nCount_RNA )) + geom_point()+ 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + theme_bw() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) 
+
+```
+
+
+#CHMI24109_LP
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_190/MIST24109_LP/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_190/MIST24109_LP/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI24109_LP = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI24109_LP$drop.class = ifelse(rownames(md_CHMI24109_LP) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI24109_LP = md_CHMI24109_LP[md_CHMI24109_LP$rna.size > 0 & md_CHMI24109_LP$prot.size > 0, ]
+
+cellmd = md_CHMI24109_LP[md_CHMI24109_LP$drop.class == 'cell', ]
+
+# filter drops with + / - 3 median absolute deviations from the median library size
+rna.mult = (2.5*mad(cellmd$rna.size))
+prot.mult = (2.5*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI24109_LP = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI24109_LP)
+
+ggplot(md_CHMI24109_LP, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+ggplot(md_CHMI24109_LP, aes(x = log10(n.gene), y = rna.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+
+background_drops = rownames(
+  md_CHMI24109_LP[ md_CHMI24109_LP$prot.size > 1.5 & 
+      md_CHMI24109_LP$prot.size < 3 & 
+      md_CHMI24109_LP$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI24109_LP])
+cell.rna.raw = rna[ ,qc_cells_CHMI24109_LP]
+cellmd_filt = cellmd[qc_cells_CHMI24109_LP, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI24109_LP = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd_filt,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI24109_LP[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI24109_LP
+rownames(CHMI24109_LP[["ADT"]])
+FeatureScatter(CHMI24109_LP, feature1 = "CD4", feature2 = "CD8a")
+
+feats <- c("nFeature_RNA","nCount_RNA","mt.prop")
+VlnPlot(CHMI24109_LP, group.by= "orig.ident", features = feats, pt.size = 0.1, combine = T, ncol = 3,cols = "#FB20FE" ) + NoLegend()
+
+ggsave("CHMI24109_LP_RNA_QC_violins.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 7,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+
+ggplot(as.data.frame(CHMI24109_LP@meta.data), aes(x = nFeature_RNA, y = nCount_RNA )) + geom_point()+ 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + theme_bw() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) 
+```
+
+
+
+
+#CHMI24109_IEL
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_190/MIST24109_IEL/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_190/MIST24109_IEL/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI24109_IEL = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI24109_IEL$drop.class = ifelse(rownames(md_CHMI24109_IEL) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI24109_IEL = md_CHMI24109_IEL[md_CHMI24109_IEL$rna.size > 0 & md_CHMI24109_IEL$prot.size > 0, ]
+
+cellmd = md_CHMI24109_IEL[md_CHMI24109_IEL$drop.class == 'cell', ]
+
+# filter drops with + / - 3 median absolute deviations from the median library size
+rna.mult = (2.5*mad(cellmd$rna.size))
+prot.mult = (2.5*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI24109_IEL = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI24109_IEL)
+
+ggplot(md_CHMI24109_IEL, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+ggplot(md_CHMI24109_IEL, aes(x = log10(n.gene), y = rna.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+
+background_drops = rownames(
+  md_CHMI24109_IEL[ md_CHMI24109_IEL$prot.size > 1.5 & 
+      md_CHMI24109_IEL$prot.size < 3 & 
+      md_CHMI24109_IEL$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI24109_IEL])
+cell.rna.raw = rna[ ,qc_cells_CHMI24109_IEL]
+cellmd_filt = cellmd[qc_cells_CHMI24109_IEL, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI24109_IEL = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd_filt,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI24109_IEL[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI24109_IEL
+rownames(CHMI24109_IEL[["ADT"]])
+FeatureScatter(CHMI24109_IEL, feature1 = "CD4", feature2 = "CD8a")
+
+feats <- c("nFeature_RNA","nCount_RNA","mt.prop")
+VlnPlot(CHMI24109_IEL, group.by= "orig.ident", features = feats, pt.size = 0.1, combine = T, ncol = 3,cols = "#FB20FE" ) + NoLegend()
+
+ggsave("CHMI24109_IEL_RNA_QC_violins.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 7,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+
+ggplot(as.data.frame(CHMI24109_IEL@meta.data), aes(x = nFeature_RNA, y = nCount_RNA )) + geom_point()+ 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + theme_bw() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) 
+
+```
+
+
+
+
+
+#CHMI2493_MLN
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_190/MIST2493_MLN/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_190/MIST2493_MLN/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI2493_MLN = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI2493_MLN$drop.class = ifelse(rownames(md_CHMI2493_MLN) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI2493_MLN = md_CHMI2493_MLN[md_CHMI2493_MLN$rna.size > 0 & md_CHMI2493_MLN$prot.size > 0, ]
+
+cellmd = md_CHMI2493_MLN[md_CHMI2493_MLN$drop.class == 'cell', ]
+
+# filter drops with + / - 3 median absolute deviations from the median library size
+rna.mult = (2.5*mad(cellmd$rna.size))
+prot.mult = (2.5*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI2493_MLN = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI2493_MLN)
+
+ggplot(md_CHMI2493_MLN, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+ggplot(md_CHMI2493_MLN, aes(x = log10(n.gene), y = rna.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+
+background_drops = rownames(
+  md_CHMI2493_MLN[ md_CHMI2493_MLN$prot.size > 1.5 & 
+      md_CHMI2493_MLN$prot.size < 3 & 
+      md_CHMI2493_MLN$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI2493_MLN])
+cell.rna.raw = rna[ ,qc_cells_CHMI2493_MLN]
+cellmd_filt = cellmd[qc_cells_CHMI2493_MLN, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI2493_MLN = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd_filt,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI2493_MLN[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI2493_MLN
+rownames(CHMI2493_MLN[["ADT"]])
+FeatureScatter(CHMI2493_MLN, feature1 = "CD4", feature2 = "CD8a")
+
+feats <- c("nFeature_RNA","nCount_RNA","mt.prop")
+VlnPlot(CHMI2493_MLN, group.by= "orig.ident", features = feats, pt.size = 0.1, combine = T, ncol = 3,cols = "#FB20FE" ) + NoLegend()
+
+ggsave("CHMI2493_MLN_RNA_QC_violins.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 7,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+
+ggplot(as.data.frame(CHMI2493_MLN@meta.data), aes(x = nFeature_RNA, y = nCount_RNA )) + geom_point()+ 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + theme_bw() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) 
+```
+
+
+
+#CHMI2493_LP
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_190/MIST2493_LP/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_190/MIST2493_LP/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI2493_LP = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI2493_LP$drop.class = ifelse(rownames(md_CHMI2493_LP) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI2493_LP = md_CHMI2493_LP[md_CHMI2493_LP$rna.size > 0 & md_CHMI2493_LP$prot.size > 0, ]
+
+cellmd = md_CHMI2493_LP[md_CHMI2493_LP$drop.class == 'cell', ]
+
+# filter drops with + / - 3 median absolute deviations from the median library size
+rna.mult = (3*mad(cellmd$rna.size))
+prot.mult = (3*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI2493_LP = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI2493_LP)
+
+ggplot(md_CHMI2493_LP, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+background_drops = rownames(
+  md_CHMI2493_LP[ md_CHMI2493_LP$prot.size > 1.5 & 
+      md_CHMI2493_LP$prot.size < 3 & 
+      md_CHMI2493_LP$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI2493_LP])
+cell.rna.raw = rna[ ,qc_cells_CHMI2493_LP]
+cellmd = cellmd[qc_cells_CHMI2493_LP, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI2493_LP = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI2493_LP[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI2493_LP
+rownames(CHMI2493_LP[["ADT"]])
+FeatureScatter(CHMI2493_LP, feature1 = "CD4", feature2 = "CD8a")
+```
+
+
+
+#CHMI24134_LP
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_192/MIST24134_LP/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_192/MIST24134_LP/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI24134_LP = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI24134_LP$drop.class = ifelse(rownames(md_CHMI24134_LP) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI24134_LP = md_CHMI24134_LP[md_CHMI24134_LP$rna.size > 0 & md_CHMI24134_LP$prot.size > 0, ]
+
+cellmd = md_CHMI24134_LP[md_CHMI24134_LP$drop.class == 'cell', ]
+
+# filter drops with + / - 3 median absolute deviations from the median library size
+rna.mult = (3*mad(cellmd$rna.size))
+prot.mult = (3*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI24134_LP = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI24134_LP)
+
+ggplot(md_CHMI24134_LP, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+background_drops = rownames(
+  md_CHMI24134_LP[ md_CHMI24134_LP$prot.size > 1.5 & 
+      md_CHMI24134_LP$prot.size < 3 & 
+      md_CHMI24134_LP$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI24134_LP])
+cell.rna.raw = rna[ ,qc_cells_CHMI24134_LP]
+cellmd = cellmd[qc_cells_CHMI24134_LP, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI24134_LP = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI24134_LP[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI24134_LP
+rownames(CHMI24134_LP[["ADT"]])
+FeatureScatter(CHMI24134_LP, feature1 = "CD4", feature2 = "CD8a")
+```
+
+#CHMI24134_MLN
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_192/MIST24134_MLN/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_192/MIST24134_MLN/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI24134_MLN = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI24134_MLN$drop.class = ifelse(rownames(md_CHMI24134_MLN) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI24134_MLN = md_CHMI24134_MLN[md_CHMI24134_MLN$rna.size > 0 & md_CHMI24134_MLN$prot.size > 0, ]
+
+cellmd = md_CHMI24134_MLN[md_CHMI24134_MLN$drop.class == 'cell', ]
+
+# filter drops with + / - 3 median absolute deviations from the median library size
+rna.mult = (3*mad(cellmd$rna.size))
+prot.mult = (3*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI24134_MLN = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI24134_MLN)
+
+ggplot(md_CHMI24134_MLN, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+background_drops = rownames(
+  md_CHMI24134_MLN[ md_CHMI24134_MLN$prot.size > 1.5 & 
+      md_CHMI24134_MLN$prot.size < 3 & 
+      md_CHMI24134_MLN$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI24134_MLN])
+cell.rna.raw = rna[ ,qc_cells_CHMI24134_MLN]
+cellmd = cellmd[qc_cells_CHMI24134_MLN, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI24134_MLN = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI24134_MLN[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI24134_MLN
+rownames(CHMI24134_MLN[["ADT"]])
+FeatureScatter(CHMI24134_MLN, feature1 = "CD4", feature2 = "CD8a")
+```
+
+#CHMI24134_IEL
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_192/MIST24134_IEL/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_192/MIST24134_IEL/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI24134_IEL = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI24134_IEL$drop.class = ifelse(rownames(md_CHMI24134_IEL) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI24134_IEL = md_CHMI24134_IEL[md_CHMI24134_IEL$rna.size > 0 & md_CHMI24134_IEL$prot.size > 0, ]
+
+cellmd = md_CHMI24134_IEL[md_CHMI24134_IEL$drop.class == 'cell', ]
+
+# filter drops with + / - 3 median absolute deviations from the median library size
+rna.mult = (3*mad(cellmd$rna.size))
+prot.mult = (3*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI24134_IEL = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI24134_IEL)
+
+ggplot(md_CHMI24134_IEL, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+background_drops = rownames(
+  md_CHMI24134_IEL[ md_CHMI24134_IEL$prot.size > 1.5 & 
+      md_CHMI24134_IEL$prot.size < 3 & 
+      md_CHMI24134_IEL$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI24134_IEL])
+cell.rna.raw = rna[ ,qc_cells_CHMI24134_IEL]
+cellmd = cellmd[qc_cells_CHMI24134_IEL, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI24134_IEL = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI24134_IEL[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI24134_IEL
+rownames(CHMI24134_IEL[["ADT"]])
+FeatureScatter(CHMI24134_IEL, feature1 = "CD4", feature2 = "CD8a")
+```
+
+
+#CHMI24142_MLN
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_197/MIST24142_MLN/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_197/MIST24142_MLN/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI24142_MLN = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI24142_MLN$drop.class = ifelse(rownames(md_CHMI24142_MLN) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI24142_MLN = md_CHMI24142_MLN[md_CHMI24142_MLN$rna.size > 0 & md_CHMI24142_MLN$prot.size > 0, ]
+
+cellmd = md_CHMI24142_MLN[md_CHMI24142_MLN$drop.class == 'cell', ]
+
+# filter drops with + / - 2.5 median absolute deviations from the median library size
+rna.mult = (2.5*mad(cellmd$rna.size))
+prot.mult = (2.5*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI24142_MLN = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI24142_MLN)
+
+ggplot(md_CHMI24142_MLN, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+ggplot(md_CHMI24142_MLN, aes(x = log10(n.gene), y = rna.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+background_drops = rownames(
+  md_CHMI24142_MLN[ 
+      md_CHMI24142_MLN$prot.size < 3 & 
+      md_CHMI24142_MLN$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI24142_MLN])
+cell.rna.raw = rna[ ,qc_cells_CHMI24142_MLN]
+cellmd_filt = cellmd[qc_cells_CHMI24142_MLN, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+isotype.controls = c("Isotype_RTK4530", "Isotype_HTK888", 
+                     "Isotype_RTK2071", "Isotype_RTK2758", "Isotype_MOPC.173", "Isotype_MOPC.21", "Isotype_MPC.11")
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI24142_MLN = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd_filt,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI24142_MLN[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI24142_MLN
+rownames(CHMI24142_MLN[["ADT"]])
+FeatureScatter(CHMI24142_MLN, feature1 = "CD19", feature2 = "CD8a")
+FeatureScatter(CHMI24142_MLN, feature1 = "CD45R-B220", feature2 = "CD19", pt.size = 0.5)
+
+
+feats <- c("nFeature_RNA","nCount_RNA","mt.prop")
+VlnPlot(CHMI24142_MLN, group.by= "orig.ident", features = feats, pt.size = 0.1, combine = T, ncol = 3,cols = "#FB20FE" ) + NoLegend()
+
+ggsave("CHMI24142_MLN_RNA_QC_violins.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 7,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+
+ggplot(as.data.frame(CHMI24142_MLN@meta.data), aes(x = nFeature_RNA, y = nCount_RNA )) + geom_point()+ 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + theme_bw() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) 
+```
+
+
+
+#CHMI24142_IEL
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_197/MIST24142_IEL/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_197/MIST24142_IEL/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI24142_IEL = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI24142_IEL$drop.class = ifelse(rownames(md_CHMI24142_IEL) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI24142_IEL = md_CHMI24142_IEL[md_CHMI24142_IEL$rna.size > 0 & md_CHMI24142_IEL$prot.size > 0, ]
+
+cellmd = md_CHMI24142_IEL[md_CHMI24142_IEL$drop.class == 'cell', ]
+
+# filter drops with + / - 2.5 median absolute deviations from the median library size
+rna.mult = (2.5*mad(cellmd$rna.size))
+prot.mult = (2.5*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI24142_IEL = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI24142_IEL)
+
+ggplot(md_CHMI24142_IEL, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+ggplot(md_CHMI24142_IEL, aes(x = log10(n.gene), y = rna.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+background_drops = rownames(
+  md_CHMI24142_IEL[ 
+      md_CHMI24142_IEL$prot.size < 3 & 
+      md_CHMI24142_IEL$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI24142_IEL])
+cell.rna.raw = rna[ ,qc_cells_CHMI24142_IEL]
+cellmd_filt = cellmd[qc_cells_CHMI24142_IEL, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+isotype.controls = c("Isotype_RTK4530", "Isotype_HTK888", 
+                     "Isotype_RTK2071", "Isotype_RTK2758", "Isotype_MOPC.173", "Isotype_MOPC.21", "Isotype_MPC.11")
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI24142_IEL = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd_filt,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI24142_IEL[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI24142_IEL
+rownames(CHMI24142_IEL[["ADT"]])
+FeatureScatter(CHMI24142_IEL, feature1 = "CD19", feature2 = "CD8a")
+FeatureScatter(CHMI24142_IEL, feature1 = "CD45R-B220", feature2 = "CD19", pt.size = 0.5)
+
+
+feats <- c("nFeature_RNA","nCount_RNA","mt.prop")
+VlnPlot(CHMI24142_IEL, group.by= "orig.ident", features = feats, pt.size = 0.1, combine = T, ncol = 3,cols = "#FB20FE" ) + NoLegend()
+
+ggsave("CHMI24142_IEL_RNA_QC_violins.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 7,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+
+ggplot(as.data.frame(CHMI24142_IEL@meta.data), aes(x = nFeature_RNA, y = nCount_RNA )) + geom_point()+ 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + theme_bw() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) 
+```
+
+
+
+
+#CHMI24142_LP
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_197/MIST24142_LP/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_197/MIST24142_LP/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI24142_LP = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI24142_LP$drop.class = ifelse(rownames(md_CHMI24142_LP) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI24142_LP = md_CHMI24142_LP[md_CHMI24142_LP$rna.size > 0 & md_CHMI24142_LP$prot.size > 0, ]
+
+cellmd = md_CHMI24142_LP[md_CHMI24142_LP$drop.class == 'cell', ]
+
+# filter drops with + / - 2.5 median absolute deviations from the median library size
+rna.mult = (2.5*mad(cellmd$rna.size))
+prot.mult = (2.5*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI24142_LP = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI24142_LP)
+
+ggplot(md_CHMI24142_LP, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+ggplot(md_CHMI24142_LP, aes(x = log10(n.gene), y = rna.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+background_drops = rownames(
+  md_CHMI24142_LP[ 
+      md_CHMI24142_LP$prot.size < 3 & 
+      md_CHMI24142_LP$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI24142_LP])
+cell.rna.raw = rna[ ,qc_cells_CHMI24142_LP]
+cellmd_filt = cellmd[qc_cells_CHMI24142_LP, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+isotype.controls = c("Isotype_RTK4530", "Isotype_HTK888", 
+                     "Isotype_RTK2071", "Isotype_RTK2758", "Isotype_MOPC.173", "Isotype_MOPC.21", "Isotype_MPC.11")
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI24142_LP = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd_filt,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI24142_LP[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI24142_LP
+rownames(CHMI24142_LP[["ADT"]])
+FeatureScatter(CHMI24142_LP, feature1 = "CD19", feature2 = "CD8a")
+FeatureScatter(CHMI24142_LP, feature1 = "CD45R-B220", feature2 = "CD19", pt.size = 0.5)
+
+
+feats <- c("nFeature_RNA","nCount_RNA","mt.prop")
+VlnPlot(CHMI24142_LP, group.by= "orig.ident", features = feats, pt.size = 0.1, combine = T, ncol = 3,cols = "#FB20FE" ) + NoLegend()
+
+ggsave("CHMI24142_LP_RNA_QC_violins.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 7,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+
+ggplot(as.data.frame(CHMI24142_LP@meta.data), aes(x = nFeature_RNA, y = nCount_RNA )) + geom_point()+ 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + theme_bw() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) 
+```
+
+#CHMI24180_MLN
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_204/MIST24180_MLN/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_204/MIST24180_MLN/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI24180_MLN = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI24180_MLN$drop.class = ifelse(rownames(md_CHMI24180_MLN) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI24180_MLN = md_CHMI24180_MLN[md_CHMI24180_MLN$rna.size > 0 & md_CHMI24180_MLN$prot.size > 0, ]
+
+cellmd = md_CHMI24180_MLN[md_CHMI24180_MLN$drop.class == 'cell', ]
+
+# filter drops with + / - 2.5 median absolute deviations from the median library size
+rna.mult = (2.5*mad(cellmd$rna.size))
+prot.mult = (2.5*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI24180_MLN = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI24180_MLN)
+
+ggplot(md_CHMI24180_MLN, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+ggplot(md_CHMI24180_MLN, aes(x = log10(n.gene), y = rna.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+background_drops = rownames(
+  md_CHMI24180_MLN[ 
+      md_CHMI24180_MLN$prot.size < 3 & 
+      md_CHMI24180_MLN$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI24180_MLN])
+cell.rna.raw = rna[ ,qc_cells_CHMI24180_MLN]
+cellmd_filt = cellmd[qc_cells_CHMI24180_MLN, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+isotype.controls = c("Isotype_RTK4530", "Isotype_HTK888", 
+                     "Isotype_RTK2071", "Isotype_RTK2758", "Isotype_MOPC.173", "Isotype_MOPC.21", "Isotype_MPC.11")
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI24180_MLN = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd_filt,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI24180_MLN[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI24180_MLN
+rownames(CHMI24180_MLN[["ADT"]])
+FeatureScatter(CHMI24180_MLN, feature1 = "CD19", feature2 = "CD8a")
+FeatureScatter(CHMI24180_MLN, feature1 = "CD45R-B220", feature2 = "CD19", pt.size = 0.5)
+
+
+feats <- c("nFeature_RNA","nCount_RNA","mt.prop")
+VlnPlot(CHMI24180_MLN, group.by= "orig.ident", features = feats, pt.size = 0.1, combine = T, ncol = 3,cols = "#FB20FE" ) + NoLegend()
+
+ggsave("CHMI24180_MLN_RNA_QC_violins.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 7,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+
+ggplot(as.data.frame(CHMI24180_MLN@meta.data), aes(x = nFeature_RNA, y = nCount_RNA )) + geom_point()+ 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + theme_bw() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) 
+```
+
+
+#CHMI24218_MLN
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_210/MIST24218_MLN/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_210/MIST24218_MLN/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI24218_MLN = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI24218_MLN$drop.class = ifelse(rownames(md_CHMI24218_MLN) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI24218_MLN = md_CHMI24218_MLN[md_CHMI24218_MLN$rna.size > 0 & md_CHMI24218_MLN$prot.size > 0, ]
+
+cellmd = md_CHMI24218_MLN[md_CHMI24218_MLN$drop.class == 'cell', ]
+
+# filter drops with + / - 2.5 median absolute deviations from the median library size
+rna.mult = (2.5*mad(cellmd$rna.size))
+prot.mult = (2.5*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI24218_MLN = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI24218_MLN)
+
+ggplot(md_CHMI24218_MLN, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+ggplot(md_CHMI24218_MLN, aes(x = log10(n.gene), y = rna.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+background_drops = rownames(
+  md_CHMI24218_MLN[ 
+      md_CHMI24218_MLN$prot.size < 3 & 
+      md_CHMI24218_MLN$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI24218_MLN])
+cell.rna.raw = rna[ ,qc_cells_CHMI24218_MLN]
+cellmd_filt = cellmd[qc_cells_CHMI24218_MLN, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+isotype.controls = c("Isotype_RTK4530", "Isotype_HTK888", 
+                     "Isotype_RTK2071", "Isotype_RTK2758", "Isotype_MOPC.173", "Isotype_MOPC.21", "Isotype_MPC.11")
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI24218_MLN = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd_filt,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI24218_MLN[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI24218_MLN
+rownames(CHMI24218_MLN[["ADT"]])
+FeatureScatter(CHMI24218_MLN, feature1 = "CD19", feature2 = "CD8a")
+FeatureScatter(CHMI24218_MLN, feature1 = "CD45R-B220", feature2 = "CD19", pt.size = 0.5)
+
+
+feats <- c("nFeature_RNA","nCount_RNA","mt.prop")
+VlnPlot(CHMI24218_MLN, group.by= "orig.ident", features = feats, pt.size = 0.1, combine = T, ncol = 3,cols = "#FB20FE" ) + NoLegend()
+
+ggsave("CHMI24218_MLN_RNA_QC_violins.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 7,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+
+ggplot(as.data.frame(CHMI24218_MLN@meta.data), aes(x = nFeature_RNA, y = nCount_RNA )) + geom_point()+ 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + theme_bw() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) 
+```
+
+
+
+#CHMI24218_IEL
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_210/MIST24218_IEL/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_210/MIST24218_IEL/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI24218_IEL = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI24218_IEL$drop.class = ifelse(rownames(md_CHMI24218_IEL) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI24218_IEL = md_CHMI24218_IEL[md_CHMI24218_IEL$rna.size > 0 & md_CHMI24218_IEL$prot.size > 0, ]
+
+cellmd = md_CHMI24218_IEL[md_CHMI24218_IEL$drop.class == 'cell', ]
+
+# filter drops with + / - 2.5 median absolute deviations from the median library size
+rna.mult = (2.5*mad(cellmd$rna.size))
+prot.mult = (2.5*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI24218_IEL = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI24218_IEL)
+
+ggplot(md_CHMI24218_IEL, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+ggplot(md_CHMI24218_IEL, aes(x = log10(n.gene), y = rna.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+background_drops = rownames(
+  md_CHMI24218_IEL[ 
+      md_CHMI24218_IEL$prot.size < 3 & 
+      md_CHMI24218_IEL$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI24218_IEL])
+cell.rna.raw = rna[ ,qc_cells_CHMI24218_IEL]
+cellmd_filt = cellmd[qc_cells_CHMI24218_IEL, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+isotype.controls = c("Isotype_RTK4530", "Isotype_HTK888", 
+                     "Isotype_RTK2071", "Isotype_RTK2758", "Isotype_MOPC.173", "Isotype_MOPC.21", "Isotype_MPC.11")
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI24218_IEL = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd_filt,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI24218_IEL[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI24218_IEL
+rownames(CHMI24218_IEL[["ADT"]])
+FeatureScatter(CHMI24218_IEL, feature1 = "CD19", feature2 = "CD8a")
+FeatureScatter(CHMI24218_IEL, feature1 = "CD45R-B220", feature2 = "CD19", pt.size = 0.5)
+
+
+feats <- c("nFeature_RNA","nCount_RNA","mt.prop")
+VlnPlot(CHMI24218_IEL, group.by= "orig.ident", features = feats, pt.size = 0.1, combine = T, ncol = 3,cols = "#FB20FE" ) + NoLegend()
+
+ggsave("CHMI24218_IEL_RNA_QC_violins.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 7,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+
+ggplot(as.data.frame(CHMI24218_IEL@meta.data), aes(x = nFeature_RNA, y = nCount_RNA )) + geom_point()+ 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + theme_bw() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) 
+```
+
+
+
+
+#CHMI24218_LP
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_210/MIST24218_LP/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_210/MIST24218_LP/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI24218_LP = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI24218_LP$drop.class = ifelse(rownames(md_CHMI24218_LP) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI24218_LP = md_CHMI24218_LP[md_CHMI24218_LP$rna.size > 0 & md_CHMI24218_LP$prot.size > 0, ]
+
+cellmd = md_CHMI24218_LP[md_CHMI24218_LP$drop.class == 'cell', ]
+
+# filter drops with + / - 2.5 median absolute deviations from the median library size
+rna.mult = (2.5*mad(cellmd$rna.size))
+prot.mult = (2.5*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI24218_LP = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI24218_LP)
+
+ggplot(md_CHMI24218_LP, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+ggplot(md_CHMI24218_LP, aes(x = log10(n.gene), y = rna.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+background_drops = rownames(
+  md_CHMI24218_LP[ 
+      md_CHMI24218_LP$prot.size < 3 & 
+      md_CHMI24218_LP$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI24218_LP])
+cell.rna.raw = rna[ ,qc_cells_CHMI24218_LP]
+cellmd_filt = cellmd[qc_cells_CHMI24218_LP, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+isotype.controls = c("Isotype_RTK4530", "Isotype_HTK888", 
+                     "Isotype_RTK2071", "Isotype_RTK2758", "Isotype_MOPC.173", "Isotype_MOPC.21", "Isotype_MPC.11")
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI24218_LP = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd_filt,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI24218_LP[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI24218_LP
+rownames(CHMI24218_LP[["ADT"]])
+FeatureScatter(CHMI24218_LP, feature1 = "CD19", feature2 = "CD8a")
+FeatureScatter(CHMI24218_LP, feature1 = "CD45R-B220", feature2 = "CD19", pt.size = 0.5)
+
+
+feats <- c("nFeature_RNA","nCount_RNA","mt.prop")
+VlnPlot(CHMI24218_LP, group.by= "orig.ident", features = feats, pt.size = 0.1, combine = T, ncol = 3,cols = "#FB20FE" ) + NoLegend()
+
+ggsave("CHMI24218_LP_RNA_QC_violins.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 7,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+
+ggplot(as.data.frame(CHMI24218_LP@meta.data), aes(x = nFeature_RNA, y = nCount_RNA )) + geom_point()+ 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + theme_bw() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) 
+```
+
+
+
+
+
+#CHMI24240_MLN
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_217/MIST24240_MLN/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_217/MIST24240_MLN/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI24240_MLN = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI24240_MLN$drop.class = ifelse(rownames(md_CHMI24240_MLN) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI24240_MLN = md_CHMI24240_MLN[md_CHMI24240_MLN$rna.size > 0 & md_CHMI24240_MLN$prot.size > 0, ]
+
+cellmd = md_CHMI24240_MLN[md_CHMI24240_MLN$drop.class == 'cell', ]
+
+# filter drops with + / - 2.5 median absolute deviations from the median library size
+rna.mult = (2.5*mad(cellmd$rna.size))
+prot.mult = (2.5*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI24240_MLN = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI24240_MLN)
+
+ggplot(md_CHMI24240_MLN, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+ggplot(md_CHMI24240_MLN, aes(x = log10(n.gene), y = rna.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+background_drops = rownames(
+  md_CHMI24240_MLN[ 
+      md_CHMI24240_MLN$prot.size < 3 & 
+      md_CHMI24240_MLN$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI24240_MLN])
+cell.rna.raw = rna[ ,qc_cells_CHMI24240_MLN]
+cellmd_filt = cellmd[qc_cells_CHMI24240_MLN, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+isotype.controls = c("Isotype_RTK4530", "Isotype_HTK888", 
+                     "Isotype_RTK2071", "Isotype_RTK2758", "Isotype_MOPC.173", "Isotype_MOPC.21", "Isotype_MPC.11")
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI24240_MLN = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd_filt,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI24240_MLN[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI24240_MLN
+rownames(CHMI24240_MLN[["ADT"]])
+FeatureScatter(CHMI24240_MLN, feature1 = "CD19", feature2 = "CD8a")
+FeatureScatter(CHMI24240_MLN, feature1 = "CD45R-B220", feature2 = "CD19", pt.size = 0.5)
+
+
+feats <- c("nFeature_RNA","nCount_RNA","mt.prop")
+VlnPlot(CHMI24240_MLN, group.by= "orig.ident", features = feats, pt.size = 0.1, combine = T, ncol = 3,cols = "#FB20FE" ) + NoLegend()
+
+ggsave("CHMI24240_MLN_RNA_QC_violins.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 7,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+
+ggplot(as.data.frame(CHMI24240_MLN@meta.data), aes(x = nFeature_RNA, y = nCount_RNA )) + geom_point()+ 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + theme_bw() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) 
+```
+
+
+
+#CHMI24240_IEL
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_217/MIST24240_IEL/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_217/MIST24240_IEL/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI24240_IEL = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI24240_IEL$drop.class = ifelse(rownames(md_CHMI24240_IEL) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI24240_IEL = md_CHMI24240_IEL[md_CHMI24240_IEL$rna.size > 0 & md_CHMI24240_IEL$prot.size > 0, ]
+
+cellmd = md_CHMI24240_IEL[md_CHMI24240_IEL$drop.class == 'cell', ]
+
+# filter drops with + / - 2.5 median absolute deviations from the median library size
+rna.mult = (2.5*mad(cellmd$rna.size))
+prot.mult = (2.5*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI24240_IEL = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI24240_IEL)
+
+ggplot(md_CHMI24240_IEL, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+ggplot(md_CHMI24240_IEL, aes(x = log10(n.gene), y = rna.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+background_drops = rownames(
+  md_CHMI24240_IEL[ 
+      md_CHMI24240_IEL$prot.size < 3 & 
+      md_CHMI24240_IEL$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI24240_IEL])
+cell.rna.raw = rna[ ,qc_cells_CHMI24240_IEL]
+cellmd_filt = cellmd[qc_cells_CHMI24240_IEL, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+isotype.controls = c("Isotype_RTK4530", "Isotype_HTK888", 
+                     "Isotype_RTK2071", "Isotype_RTK2758", "Isotype_MOPC.173", "Isotype_MOPC.21", "Isotype_MPC.11")
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI24240_IEL = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd_filt,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI24240_IEL[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI24240_IEL
+rownames(CHMI24240_IEL[["ADT"]])
+FeatureScatter(CHMI24240_IEL, feature1 = "CD19", feature2 = "CD8a")
+FeatureScatter(CHMI24240_IEL, feature1 = "CD45R-B220", feature2 = "CD19", pt.size = 0.5)
+
+
+feats <- c("nFeature_RNA","nCount_RNA","mt.prop")
+VlnPlot(CHMI24240_IEL, group.by= "orig.ident", features = feats, pt.size = 0.1, combine = T, ncol = 3,cols = "#FB20FE" ) + NoLegend()
+
+ggsave("CHMI24240_IEL_RNA_QC_violins.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 7,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+
+ggplot(as.data.frame(CHMI24240_IEL@meta.data), aes(x = nFeature_RNA, y = nCount_RNA )) + geom_point()+ 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + theme_bw() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) 
+```
+
+
+
+
+#CHMI24240_LP
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_217/MIST24240_LP/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_217/MIST24240_LP/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI24240_LP = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI24240_LP$drop.class = ifelse(rownames(md_CHMI24240_LP) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI24240_LP = md_CHMI24240_LP[md_CHMI24240_LP$rna.size > 0 & md_CHMI24240_LP$prot.size > 0, ]
+
+cellmd = md_CHMI24240_LP[md_CHMI24240_LP$drop.class == 'cell', ]
+
+# filter drops with + / - 2.5 median absolute deviations from the median library size
+rna.mult = (2.5*mad(cellmd$rna.size))
+prot.mult = (2.5*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI24240_LP = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI24240_LP)
+
+ggplot(md_CHMI24240_LP, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+ggplot(md_CHMI24240_LP, aes(x = log10(n.gene), y = rna.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+background_drops = rownames(
+  md_CHMI24240_LP[ 
+      md_CHMI24240_LP$prot.size < 3 & 
+      md_CHMI24240_LP$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI24240_LP])
+cell.rna.raw = rna[ ,qc_cells_CHMI24240_LP]
+cellmd_filt = cellmd[qc_cells_CHMI24240_LP, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+isotype.controls = c("Isotype_RTK4530", "Isotype_HTK888", 
+                     "Isotype_RTK2071", "Isotype_RTK2758", "Isotype_MOPC.173", "Isotype_MOPC.21", "Isotype_MPC.11")
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI24240_LP = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd_filt,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI24240_LP[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI24240_LP
+rownames(CHMI24240_LP[["ADT"]])
+FeatureScatter(CHMI24240_LP, feature1 = "CD19", feature2 = "CD8a")
+FeatureScatter(CHMI24240_LP, feature1 = "CD45R-B220", feature2 = "CD19", pt.size = 0.5)
+
+
+feats <- c("nFeature_RNA","nCount_RNA","mt.prop")
+VlnPlot(CHMI24240_LP, group.by= "orig.ident", features = feats, pt.size = 0.1, combine = T, ncol = 3,cols = "#FB20FE" ) + NoLegend()
+
+ggsave("CHMI24240_LP_RNA_QC_violins.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 7,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+
+ggplot(as.data.frame(CHMI24240_LP@meta.data), aes(x = nFeature_RNA, y = nCount_RNA )) + geom_point()+ 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + theme_bw() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) 
+```
+
+
+#CHMI24235_MLN
+```{r}
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_217/MIST24235_MLN/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_217/MIST24235_MLN/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+
+
+# define cell-containing barcodes and separate cells and empty drops
+stained_cells = colnames(filtered.data$`Gene Expression`)
+#background = setdiff(colnames(raw.data$`Gene Expression`), filtered.data)
+
+# split the data into separate matrices for RNA and ADT
+prot = raw.data$`Antibody Capture`
+rna = raw.data$`Gene Expression`
+
+#Add proportion mitochondrial
+mtgene = grep(pattern = "^mt-", rownames(rna), value = TRUE) # used below
+rb.genes <- c(grep(pattern = "Rps", rownames(rna), value = TRUE), grep(pattern = "Rpl", rownames(rna), value = TRUE))
+md_CHMI24235_MLN = data.frame(
+  rna.size = log10(Matrix::colSums(rna)), 
+  prot.size = log10(Matrix::colSums(prot)), 
+  n.gene = Matrix::colSums(rna > 0), 
+  mt.prop = Matrix::colSums(rna[mtgene, ]) / Matrix::colSums(rna), rb.prop = Matrix::colSums(rna[rb.genes, ]) / Matrix::colSums(rna))
+
+# add indicator for barcodes Cell Ranger called as cells
+md_CHMI24235_MLN$drop.class = ifelse(rownames(md_CHMI24235_MLN) %in% stained_cells, 'cell', 'background')
+
+# remove barcodes with no evidence of capture in the experiment
+md_CHMI24235_MLN = md_CHMI24235_MLN[md_CHMI24235_MLN$rna.size > 0 & md_CHMI24235_MLN$prot.size > 0, ]
+
+cellmd = md_CHMI24235_MLN[md_CHMI24235_MLN$drop.class == 'cell', ]
+
+# filter drops with + / - 2.5 median absolute deviations from the median library size
+rna.mult = (2.5*mad(cellmd$rna.size))
+prot.mult = (2.5*mad(cellmd$prot.size))
+rna.lower = median(cellmd$rna.size) - rna.mult
+rna.upper = median(cellmd$rna.size) + rna.mult
+prot.lower = median(cellmd$prot.size) - prot.mult
+prot.upper = median(cellmd$prot.size) + prot.mult
+
+# filter rows based on droplet qualty control metrics
+qc_cells_CHMI24235_MLN = rownames(
+  cellmd[cellmd$prot.size > prot.lower & cellmd$n.gene >750 & 
+         cellmd$prot.size < prot.upper & 
+         cellmd$rna.size > rna.lower & 
+         cellmd$rna.size < rna.upper & 
+         cellmd$mt.prop < 0.20, ]
+  )
+
+length(qc_cells_CHMI24235_MLN)
+
+ggplot(md_CHMI24235_MLN, aes(x = log10(n.gene), y = prot.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+ggplot(md_CHMI24235_MLN, aes(x = log10(n.gene), y = rna.size )) +
+   theme_bw() + 
+   geom_bin2d(bins = 300) + 
+   scale_fill_viridis_c(option = "C") + 
+   facet_wrap(~drop.class)
+
+background_drops = rownames(
+  md_CHMI24235_MLN[ 
+      md_CHMI24235_MLN$prot.size < 3 & 
+      md_CHMI24235_MLN$rna.size < 2.5, ]
+  ) 
+background.adt.mtx = as.matrix(prot[ , background_drops])
+
+
+
+cell.adt.raw = as.matrix(prot[ , qc_cells_CHMI24235_MLN])
+cell.rna.raw = rna[ ,qc_cells_CHMI24235_MLN]
+cellmd_filt = cellmd[qc_cells_CHMI24235_MLN, ]
+
+#Perform Normalization with dsb
+pm = sort(apply(cell.adt.raw, 1, max))
+pm2 = apply(background.adt.mtx, 1, max)
+head(pm, n=40)
+rownames(cell.adt.raw)
+isotype.controls = c("Isotype_RTK4530", "Isotype_HTK888", 
+                     "Isotype_RTK2071", "Isotype_RTK2758", "Isotype_MOPC.173", "Isotype_MOPC.21", "Isotype_MPC.11")
+
+# normalize and denoise with dsb with 
+cells.dsb.norm = DSBNormalizeProtein(
+  cell_protein_matrix = cell.adt.raw, 
+  empty_drop_matrix = background.adt.mtx, 
+  denoise.counts = TRUE, 
+  use.isotype.control = TRUE, 
+  isotype.control.name.vec = isotype.controls
+  )
+
+#Integrate with Seurat
+# integrating with Seurat
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.adt.raw))))
+stopifnot(isTRUE(all.equal(rownames(cellmd_filt), colnames(cell.rna.raw))))
+
+# create Seurat object note: min.cells is a gene filter, not a cell filter
+CHMI24235_MLN = Seurat::CreateSeuratObject(counts = cell.rna.raw, 
+                               meta.data = cellmd_filt,
+                               assay = "RNA", 
+                               min.cells = 20)
+
+# add dsb normalized matrix "cell.adt.dsb" to the "CITE" data (not counts!) slot
+CHMI24235_MLN[["ADT"]] = Seurat::CreateAssayObject(data = cells.dsb.norm)
+CHMI24235_MLN
+rownames(CHMI24235_MLN[["ADT"]])
+FeatureScatter(CHMI24235_MLN, feature1 = "CD19", feature2 = "CD8a")
+FeatureScatter(CHMI24235_MLN, feature1 = "CD45R-B220", feature2 = "CD19", pt.size = 0.5)
+
+
+feats <- c("nFeature_RNA","nCount_RNA","mt.prop")
+VlnPlot(CHMI24235_MLN, group.by= "orig.ident", features = feats, pt.size = 0.1, combine = T, ncol = 3,cols = "#FB20FE" ) + NoLegend()
+
+ggsave("CHMI24235_MLN_RNA_QC_violins.png", plot = last_plot(),  device = NULL,
+  path = images,  scale = 1, width = 7,  height = 5,
+  units = c("in"), dpi = 600, limitsize = TRUE,  bg = NULL)
+
+ggplot(as.data.frame(CHMI24235_MLN@meta.data), aes(x = nFeature_RNA, y = nCount_RNA )) + geom_point()+ 
+	scale_colour_gradient(low = "gray90", high = "black") +
+  	stat_smooth(method=lm) +
+  	scale_x_log10() + 
+  	scale_y_log10() + theme_bw() +
+  	geom_vline(xintercept = 500) +
+  	geom_hline(yintercept = 250) 
+```
+
+
+# Add Metadata to the samples
+```{r}
+CHMI2482_MLN@meta.data["orig.ident"] <- "CHMI2482_MLN"
+CHMI2482_MLN@meta.data["Mouse"] <- "CHMI2482"
+CHMI2482_MLN@meta.data["Tissue"] <- "Mesenteric Lymph Node"
+CHMI2482_MLN@meta.data["InfectionStatus"] <- "Naive"
+CHMI2482_MLN_Meta = CHMI2482_MLN@meta.data
+head(CHMI2482_MLN_Meta)
+head(colnames(CHMI2482_MLN[["ADT"]]))
+head(colnames(CHMI2482_MLN[["RNA"]]))
+colnames(CHMI2482_MLN)<- paste0("CHMI2482_MLN_", colnames(CHMI2482_MLN))
+
+CHMI2482_LP@meta.data["orig.ident"] <- "CHMI2482_LP"
+CHMI2482_LP@meta.data["Mouse"] <- "CHMI2482"
+CHMI2482_LP@meta.data["Tissue"] <- "Lamina Propria"
+CHMI2482_LP@meta.data["InfectionStatus"] <- "Naive"
+colnames(CHMI2482_LP)<- paste0("CHMI2482_LP_", colnames(CHMI2482_LP))
+
+CHMI2482_IEL@meta.data["orig.ident"] <- "CHMI2482_IEL"
+CHMI2482_IEL@meta.data["Mouse"] <- "CHMI2482"
+CHMI2482_IEL@meta.data["Tissue"] <- "Intestinal Epithelial Cells"
+CHMI2482_IEL@meta.data["InfectionStatus"] <- "Naive"
+colnames(CHMI2482_IEL)<- paste0("CHMI2482_IEL_", colnames(CHMI2482_IEL))
+
+CHMI2489_MLN@meta.data["orig.ident"] <- "CHMI2489_MLN"
+CHMI2489_MLN@meta.data["Mouse"] <- "CHMI2489"
+CHMI2489_MLN@meta.data["Tissue"] <- "Mesenteric Lymph Node"
+CHMI2489_MLN@meta.data["InfectionStatus"] <- "Cryptosporidium"
+colnames(CHMI2489_MLN)<- paste0("CHMI2489_MLN_", colnames(CHMI2489_MLN))
+
+CHMI2489_LP@meta.data["orig.ident"] <- "CHMI2489_LP"
+CHMI2489_LP@meta.data["Mouse"] <- "CHMI2489"
+CHMI2489_LP@meta.data["Tissue"] <- "Lamina Propria"
+CHMI2489_LP@meta.data["InfectionStatus"] <- "Cryptosporidium"
+colnames(CHMI2489_LP)<- paste0("CHMI2489_LP_", colnames(CHMI2489_LP))
+
+CHMI2489_IEL@meta.data["orig.ident"] <- "CHMI2489_IEL"
+CHMI2489_IEL@meta.data["Mouse"] <- "CHMI2489"
+CHMI2489_IEL@meta.data["Tissue"] <- "Intestinal Epithelial Cells"
+CHMI2489_IEL@meta.data["InfectionStatus"] <- "Cryptosporidium"
+colnames(CHMI2489_IEL)<- paste0("CHMI2489_IEL_", colnames(CHMI2489_IEL))
+
+CHMI24109_MLN@meta.data["orig.ident"] <- "CHMI24109_MLN"
+CHMI24109_MLN@meta.data["Mouse"] <- "CHMI24109"
+CHMI24109_MLN@meta.data["Tissue"] <- "Mesenteric Lymph Node"
+CHMI24109_MLN@meta.data["InfectionStatus"] <- "Naive"
+colnames(CHMI24109_MLN)<- paste0("CHMI24109_MLN_", colnames(CHMI24109_MLN))
+
+CHMI24109_LP@meta.data["orig.ident"] <- "CHMI24109_LP"
+CHMI24109_LP@meta.data["Mouse"] <- "CHMI24109"
+CHMI24109_LP@meta.data["Tissue"] <- "Lamina Propria"
+CHMI24109_LP@meta.data["InfectionStatus"] <- "Naive"
+colnames(CHMI24109_LP)<- paste0("CHMI24109_LP_", colnames(CHMI24109_LP))
+
+CHMI24109_IEL@meta.data["orig.ident"] <- "CHMI24109_IEL"
+CHMI24109_IEL@meta.data["Mouse"] <- "CHMI24109"
+CHMI24109_IEL@meta.data["Tissue"] <- "Intestinal Epithelial Cells"
+CHMI24109_IEL@meta.data["InfectionStatus"] <- "Naive"
+colnames(CHMI24109_IEL)<- paste0("CHMI24109_IEL_", colnames(CHMI24109_IEL))
+
+CHMI2493_MLN@meta.data["orig.ident"] <- "CHMI2493_MLN"
+CHMI2493_MLN@meta.data["Mouse"] <- "CHMI2493"
+CHMI2493_MLN@meta.data["Tissue"] <- "Mesenteric Lymph Node"
+CHMI2493_MLN@meta.data["InfectionStatus"] <- "Cryptosporidium"
+colnames(CHMI2493_MLN)<- paste0("CHMI2493_MLN_", colnames(CHMI2493_MLN))
+
+CHMI2493_LP@meta.data["orig.ident"] <- "CHMI2493_LP"
+CHMI2493_LP@meta.data["Mouse"] <- "CHMI2493"
+CHMI2493_LP@meta.data["Tissue"] <- "Lamina Propria"
+CHMI2493_LP@meta.data["InfectionStatus"] <- "Cryptosporidium"
+colnames(CHMI2493_LP)<- paste0("CHMI2493_LP_", colnames(CHMI2493_LP))
+
+CHMI24134_MLN@meta.data["orig.ident"] <- "CHMI24134_MLN"
+CHMI24134_MLN@meta.data["Mouse"] <- "CHMI24134"
+CHMI24134_MLN@meta.data["Tissue"] <- "Mesenteric Lymph Node"
+CHMI24134_MLN@meta.data["InfectionStatus"] <- "Yersinia"
+CHMI24134_MLN_Meta = CHMI24134_MLN@meta.data
+head(CHMI24134_MLN_Meta)
+colnames(CHMI24134_MLN)<- paste0("CHMI24134_MLN_", colnames(CHMI24134_MLN))
+
+CHMI24134_LP@meta.data["orig.ident"] <- "CHMI24134_LP"
+CHMI24134_LP@meta.data["Mouse"] <- "CHMI24134"
+CHMI24134_LP@meta.data["Tissue"] <- "Lamina Propria"
+CHMI24134_LP@meta.data["InfectionStatus"] <- "Yersinia"
+colnames(CHMI24134_LP)<- paste0("CHMI24134_LP_", colnames(CHMI24134_LP))
+
+CHMI24134_IEL@meta.data["orig.ident"] <- "CHMI24134_IEL"
+CHMI24134_IEL@meta.data["Mouse"] <- "CHMI24134"
+CHMI24134_IEL@meta.data["Tissue"] <- "Intestinal Epithelial Cells"
+CHMI24134_IEL@meta.data["InfectionStatus"] <- "Yersinia"
+colnames(CHMI24134_IEL)<- paste0("CHMI24134_IEL_", colnames(CHMI24134_IEL))
+
+CHMI24142_MLN@meta.data["orig.ident"] <- "CHMI24142_MLN"
+CHMI24142_MLN@meta.data["Mouse"] <- "CHMI24142"
+CHMI24142_MLN@meta.data["Tissue"] <- "Mesenteric Lymph Node"
+CHMI24142_MLN@meta.data["InfectionStatus"] <- "Yersinia"
+colnames(CHMI24142_MLN)<- paste0("CHMI24142_MLN_", colnames(CHMI24142_MLN))
+
+CHMI24142_LP@meta.data["orig.ident"] <- "CHMI24142_LP"
+CHMI24142_LP@meta.data["Mouse"] <- "CHMI24142"
+CHMI24142_LP@meta.data["Tissue"] <- "Lamina Propria"
+CHMI24142_LP@meta.data["InfectionStatus"] <- "Yersinia"
+colnames(CHMI24142_LP)<- paste0("CHMI24142_LP_", colnames(CHMI24142_LP))
+
+CHMI24142_IEL@meta.data["orig.ident"] <- "CHMI24142_IEL"
+CHMI24142_IEL@meta.data["Mouse"] <- "CHMI24142"
+CHMI24142_IEL@meta.data["Tissue"] <- "Intestinal Epithelial Cells"
+CHMI24142_IEL@meta.data["InfectionStatus"] <- "Yersinia"
+colnames(CHMI24142_IEL)<- paste0("CHMI24142_IEL_", colnames(CHMI24142_IEL))
+
+CHMI24180_MLN@meta.data["orig.ident"] <- "CHMI24180_MLN"
+CHMI24180_MLN@meta.data["Mouse"] <- "CHMI24180"
+CHMI24180_MLN@meta.data["Tissue"] <- "Mesenteric Lymph Node"
+CHMI24180_MLN@meta.data["InfectionStatus"] <- "H.poly"
+colnames(CHMI24180_MLN)<- paste0("CHMI24180_MLN_", colnames(CHMI24180_MLN))
+
+CHMI24218_MLN@meta.data["orig.ident"] <- "CHMI24218_MLN"
+CHMI24218_MLN@meta.data["Mouse"] <- "CHMI24218"
+CHMI24218_MLN@meta.data["Tissue"] <- "Mesenteric Lymph Node"
+CHMI24218_MLN@meta.data["InfectionStatus"] <- "Candida"
+colnames(CHMI24218_MLN)<- paste0("CHMI24218_MLN_", colnames(CHMI24218_MLN))
+
+CHMI24218_LP@meta.data["orig.ident"] <- "CHMI24218_LP"
+CHMI24218_LP@meta.data["Mouse"] <- "CHMI24218"
+CHMI24218_LP@meta.data["Tissue"] <- "Lamina Propria"
+CHMI24218_LP@meta.data["InfectionStatus"] <- "Candida"
+colnames(CHMI24218_LP)<- paste0("CHMI24218_LP_", colnames(CHMI24218_LP))
+
+CHMI24218_IEL@meta.data["orig.ident"] <- "CHMI24218_IEL"
+CHMI24218_IEL@meta.data["Mouse"] <- "CHMI24218"
+CHMI24218_IEL@meta.data["Tissue"] <- "Intestinal Epithelial Cells"
+CHMI24218_IEL@meta.data["InfectionStatus"] <- "Candida"
+colnames(CHMI24218_IEL)<- paste0("CHMI24218_IEL_", colnames(CHMI24218_IEL))
+
+CHMI24240_MLN@meta.data["orig.ident"] <- "CHMI24240_MLN"
+CHMI24240_MLN@meta.data["Mouse"] <- "CHMI24240"
+CHMI24240_MLN@meta.data["Tissue"] <- "Mesenteric Lymph Node"
+CHMI24240_MLN@meta.data["InfectionStatus"] <- "Cryptosporidium"
+colnames(CHMI24240_MLN)<- paste0("CHMI24240_MLN_", colnames(CHMI24240_MLN))
+
+CHMI24240_LP@meta.data["orig.ident"] <- "CHMI24240_LP"
+CHMI24240_LP@meta.data["Mouse"] <- "CHMI24240"
+CHMI24240_LP@meta.data["Tissue"] <- "Lamina Propria"
+CHMI24240_LP@meta.data["InfectionStatus"] <- "Cryptosporidium"
+colnames(CHMI24240_LP)<- paste0("CHMI24240_LP_", colnames(CHMI24240_LP))
+
+CHMI24240_IEL@meta.data["orig.ident"] <- "CHMI24240_IEL"
+CHMI24240_IEL@meta.data["Mouse"] <- "CHMI24240"
+CHMI24240_IEL@meta.data["Tissue"] <- "Intestinal Epithelial Cells"
+CHMI24240_IEL@meta.data["InfectionStatus"] <- "Cryptosporidium"
+colnames(CHMI24240_IEL)<- paste0("CHMI24240_IEL_", colnames(CHMI24240_IEL))
+
+CHMI24235_MLN@meta.data["orig.ident"] <- "CHMI24235_MLN"
+CHMI24235_MLN@meta.data["Mouse"] <- "CHMI24235"
+CHMI24235_MLN@meta.data["Tissue"] <- "Mesenteric Lymph Node"
+CHMI24235_MLN@meta.data["InfectionStatus"] <- "Candida"
+colnames(CHMI24235_MLN)<- paste0("CHMI24235_MLN_", colnames(CHMI24235_MLN))
+```
+
+#MergeData
+```{r}
+#Merge the data sets - based on combined
+MLN_data <- merge(CHMI2482_MLN, y = c(CHMI2489_MLN, CHMI24109_MLN, CHMI2493_MLN,  CHMI24134_MLN,  CHMI24142_MLN, CHMI24180_MLN, CHMI24218_MLN, CHMI24240_MLN, CHMI24235_MLN), add.cell.ids = c("CHMI2482_MLN", "CHMI2489_MLN", "CHMI24109_MLN", "CHMI2493_MLN", "CHMI24134_MLN","CHMI24142_MLN",  "CHMI24180_MLN", "CHMI24218_MLN", "CHMI24240_MLN", "CHMI24235_MLN"), project = "Combined", merge.data = TRUE)
+
+Ileum_data <- merge(CHMI2482_LP, y = c(  CHMI2482_IEL,  CHMI2489_IEL, CHMI2489_LP, CHMI24109_IEL, CHMI24109_LP,  CHMI2493_LP,  CHMI24134_LP, CHMI24134_IEL,  CHMI24142_IEL, CHMI24142_LP,  CHMI24218_LP, CHMI24218_IEL, CHMI24240_LP, CHMI24240_IEL), add.cell.ids = c( "CHMI2482_LP", "CHMI2482_IEL",  "CHMI2489_IEL", "CHMI2489_LP", "CHMI24109_IEL", "CHMI24109_LP",  "CHMI2493_LP",  "CHMI24134_LP", "CHMI24134_IEL",  "CHMI24142_IEL", "CHMI24142_LP",  "CHMI24218_LP", "CHMI24218_IEL", "CHMI24240_LP", "CHMI24240_IEL"), project = "Combined", merge.data = TRUE)
+```
+
+#The R environment for the merged objects prior to downstream analysis was saved as Ileum_MLN_combined_prior_to_anlysis.RData in Seurat_Files for this project
+
+

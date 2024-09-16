@@ -1,0 +1,820 @@
+---
+title: "Analysis_2_Annotation"
+author: "AndrewHart"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##Load the Libraries----
+```{r, warning=FALSE, error=FALSE}
+library(Seurat)
+library(Signac)
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(data.table)
+library(cowplot)
+library(scCustomize)
+library(forcats)
+library(ggbreak)
+library(presto)
+library(ggforce)
+library(SingleR)
+library(celldex)
+library(harmony)
+#library(Azimuth)
+library(glmGamPoi)
+library(future)
+library(dsb)
+library(SeuratDisk)
+library(RColorBrewer)
+library(monocle3)
+library(gt)
+options(future.globals.maxSize = 5000 * 1024^2)
+```
+
+#directory set up
+```{r}
+getwd() #/home/hartandrew
+setwd("/data/hartandrew/Projects/MIST/MIST_Analysis")
+out <- "/data/hartandrew/Projects/MIST/MIST_Analysis/Output"
+version <- "/data/hartandrew/Projects/MIST/MIST_Analysis/Version"
+seurat <- "/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files"
+images <- "/data/hartandrew/Projects/MIST/MIST_Analysis/Images"
+CSV <- "/data/hartandrew/Projects/MIST/MIST_Analysis/CSV"
+```
+
+#Color Picking
+```{r}
+# I have chosen 6 colors to represent the 6 different types of infections
+colors6 <- c("#980339", "#379FFB", "#D6A206", "#027102", "#6313B7", "#AFAFAF")
+colors5 <- c("#980339", "#379FFB", "#D6A206", "#027102", "#6313B7")
+```
+
+
+#Load the Objects 
+```{r}
+
+MLN <- LoadH5Seurat("/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/MLN_clustered.h5Seurat")
+Ileum <- LoadH5Seurat("/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/Ileum_clustered.h5Seurat")
+
+MLN
+Ileum
+```
+
+# Convert back to v5
+```{r}
+MLN[["RNA"]] <-  as(MLN[["RNA"]], "Assay5")
+MLN[["ADT"]] <-  as(MLN[["ADT"]], "Assay5")
+Ileum[["RNA"]] <-  as(Ileum[["RNA"]], "Assay5")
+Ileum[["ADT"]] <-  as(Ileum[["ADT"]], "Assay5")
+```
+# Examine the UMAP and Clusters
+```{r}
+DimPlot(MLN, reduction = "wnn.umap",   group.by = c( "WNN_clusters", "Monocle_clusters"),
+  combine = FALSE, label.size = 2, label = TRUE, raster = F)
+DimPlot(Ileum, reduction = "wnn.umap",   group.by = c( "WNN_clusters", "Monocle_clusters"),
+  combine = FALSE, label.size = 2, label = TRUE, raster = F)
+``` 
+
+# Assign unbiased automated annotations based on clusters using SingleR and Azimuth
+```{r}
+ref <- celldex::ImmGenData()
+MLN <- JoinLayers(MLN)
+data_matrix <- MLN[["RNA"]]$data 
+clusters_wnn <- MLN$Monocle_clusters 
+MLN[['RNA']] <-  split(x = MLN[['RNA']], f = MLN$orig.ident) 
+
+#Use singleR to determine clusters with immgen dataset
+# The labels category has multiple levels of granularity - you can try multiple. I recommend the one below
+Anno_RNA_singleR_wnn <- SingleR(method = "cluster",  data_matrix , ref = ref,
+    labels = ref$label.fine, clusters = clusters_wnn)
+#Make a new metadata column and apply annotations to appropriate clusters
+MLN[["SingleR.labels.wnn"]] <-  Anno_RNA_singleR_wnn$labels[match(MLN[[]][["Monocle_clusters"]], rownames(Anno_RNA_singleR_wnn))]
+DimPlot(MLN, reduction = "wnn.umap",  group.by = c("SingleR.labels.wnn"),
+  combine = TRUE, label.size = 3, label = TRUE) + NoLegend()
+
+Ileum <- JoinLayers(Ileum)
+data_matrix <- Ileum[["RNA"]]$data 
+clusters_wnn <- Ileum$Monocle_clusters 
+Ileum[['RNA']] <-  split(x = Ileum[['RNA']], f = Ileum$orig.ident) 
+
+#Use singleR to determine clusters with immgen dataset
+# The labels category has multiple levels of granularity - you can try multiple. I recommend the one below
+Anno_RNA_singleR_wnn <- SingleR(method = "cluster",  data_matrix , ref = ref,
+    labels = ref$label.fine, clusters = clusters_wnn)
+#Make a new metadata column and apply annotations to appropriate clusters
+Ileum[["SingleR.labels.wnn"]] <-  Anno_RNA_singleR_wnn$labels[match(Ileum[[]][["Monocle_clusters"]], rownames(Anno_RNA_singleR_wnn))]
+DimPlot(Ileum, reduction = "wnn.umap",  group.by = c("SingleR.labels.wnn"),
+  combine = TRUE, label.size = 3, label = TRUE) + NoLegend()
+```
+
+
+```{r}
+#options(timeout = max(1000, getOption("timeout")))
+#if (!require("BiocManager", quietly = TRUE))
+#install.packages("BiocManager")
+#BiocManager::install("BSgenome.Hsapiens.UCSC.hg38")
+#remotes::install_github('satijalab/azimuth', ref = 'master')
+```
+
+```{r}
+library(Azimuth)
+#create an duplcate dataset to run th Azimuth clustering on - make sure to delete after transfering umap and labels to save time
+MLN2 <- MLN
+DefaultAssay(MLN2) <- "RNA"
+MLN2 <- JoinLayers(MLN2)
+MLN2 <- RunAzimuth(MLN2, reference = "tonsilref", 
+  query.modality = "RNA", 
+  umap.name = "azimuth.umap")
+#Check assays - Do you have to re-add the ADT data? is normalized RNA there?
+
+MLN[["azimuth.umap"]]<-MLN2[["azimuth.umap"]]
+MLN[["azimuth_tonsil_l1.score"]] <- MLN2[["predicted.celltype.l1.score"]]
+MLN[["azimuth_tonsil_l1"]] <- MLN2[["predicted.celltype.l1"]]
+MLN[["azimuth_tonsil_l2.score"]] <- MLN2[["predicted.celltype.l2.score"]]
+MLN[["azimuth_tonsil_l2"]] <- MLN2[["predicted.celltype.l2"]]
+
+remove(MLN2)
+
+Ileum2 <- Ileum
+DefaultAssay(Ileum2) <- "RNA"
+Ileum2 <- JoinLayers(Ileum2)
+Ileum2 <- RunAzimuth(Ileum2, reference = "lungref", 
+  query.modality = "RNA", 
+  umap.name = "azimuth.umap")
+#Check assays - Do you have to re-add the ADT data? is normalized RNA there?
+
+Ileum[["azimuth.umap"]]<-Ileum2[["azimuth.umap"]]
+Ileum[["azimuth_lung_l1.score"]] <- Ileum2[["predicted.ann_level_1.score"]]
+Ileum[["azimuth_lung_l1"]] <- Ileum2[["predicted.ann_level_1"]]
+Ileum[["azimuth_lung_l2.score"]] <- Ileum2[["predicted.ann_level_2.score"]]
+Ileum[["azimuth_lung_l2"]] <- Ileum2[["predicted.ann_level_2"]]
+Ileum[["azimuth_lung_l3"]] <- Ileum2[["predicted.ann_level_3"]]
+Ileum[["azimuth_lung_l3.score"]] <- Ileum2[["predicted.ann_level_3.score"]]
+Ileum[["azimuth_lung_l4"]] <- Ileum2[["predicted.ann_level_4"]]
+Ileum[["azimuth_lung_l4.score"]] <- Ileum2[["predicted.ann_level_4.score"]]
+Ileum[["azimuth_lung_l5"]] <- Ileum2[["predicted.ann_level_5"]]
+Ileum[["azimuth_lung_l5.score"]] <- Ileum2[["predicted.ann_level_5.score"]]
+Ileum[["azimuth_lung_fine"]] <- Ileum2[["predicted.ann_finest_level"]]
+Ileum[["azimuth_lung_fine.score"]] <- Ileum2[["predicted.ann_finest_level.score"]]
+remove(Ileum2)
+```
+
+#Plot both New annotations on the UMAP
+```{r}
+DimPlot(MLN, reduction = "wnn.umap",   group.by = c("WNN_clusters"),combine = FALSE, label.size = 3.5, label = TRUE) 
+DimPlot(MLN, reduction = "wnn.umap",   group.by = c("Monocle_clusters"),combine = FALSE, label.size = 3.5, label = TRUE) 
+DimPlot(MLN, reduction = "wnn.umap",   group.by = "SingleR.labels.wnn", label.size = 3, label = TRUE, repel = T, combine = T) +NoLegend()
+DimPlot(MLN, reduction = "wnn.umap",   group.by  = "azimuth_tonsil_l2", label.size = 3, label = TRUE, repel = TRUE, combine = T) + NoLegend()
+DimPlot(MLN, reduction = "wnn.umap",   group.by  = "azimuth_tonsil_l2", label.size = 3, label = TRUE, repel = F, combine = T) + NoLegend()
+```
+```{r}
+DimPlot(Ileum, reduction = "wnn.umap",   group.by = c("WNN_clusters"),combine = FALSE, label.size = 3.5, label = TRUE) 
+DimPlot(Ileum, reduction = "wnn.umap",   group.by = c("Monocle_clusters"),combine = FALSE, label.size = 3.5, label = TRUE) 
+DimPlot(Ileum, reduction = "wnn.umap",   group.by = "SingleR.labels.wnn", label.size = 3, label = TRUE, repel = T, combine = T) +NoLegend()
+DimPlot(Ileum, reduction = "wnn.umap",   group.by  = "azimuth_lung_fine", label.size = 3, label = TRUE, repel = TRUE, combine = T) + NoLegend()
+DimPlot(Ileum, reduction = "wnn.umap",   group.by  = "azimuth_lung_l5", label.size = 3, label = TRUE, repel = F, combine = T) + NoLegend()
+```
+
+
+
+#Labeling the Epithelial compartment. I used two studies where genes for major components of the intestinal compartment are named.One is Haber, A. L.,  O., … Regev, A. (2017). https://doi.org/10.1038/nature24489  and  #Pardy, R. D., Walzer, K. A.,  Hunter, C. A. (2024). https://doi.org/10.1371/journal.ppat.1011820
+```{r}
+#Intestinal Epithelial Stem cells 
+
+DefaultAssay(Ileum) <- "RNA"
+Ileum <- JoinLayers(Ileum)
+
+stem_features <- list(c( 'Lgr5', 'Ascl2', 'Slc12a2', 'Axin2','Olfm4', 'Gkn3'))
+entero_features <- list(c( 'Chga','Chgb','Tac1','Tph1', 'Neurog3'))
+tuft_features <- list(c(  'Dclk1',  'Gnat3',  'Plcb2',  'Trpm5',   'Il25',  'Tslp'))
+goblet_features <- list(c( 'Clca1', 'Zg16',  'Agr2',   'Muc2',   'Fcgbp'))
+entericGlia <- list(c("S100b", "Plp1", "Sox10", "Gfap", "Fabp7"))
+paneth_features <- list(c(  'Defa20',  'Defa22',  'Defa21',   'Gm15308',   'Defa17',  'Clps',   'Defa23',   'Gm15299',  'Lyz1',   'Mptx2'))
+Ileum <- AddModuleScore(  object = Ileum,  features = paneth_features,  ctrl = 100,  name = 'Paneth_Features')
+Ileum <- AddModuleScore( object = Ileum,  features = goblet_features,  ctrl = 100,  name = 'Goblet_Features')
+Ileum <- AddModuleScore( object = Ileum, features = tuft_features, ctrl = 100, name = 'Tuft_Features')
+Ileum <- AddModuleScore(object = Ileum, features = stem_features, ctrl = 100, name = 'StemCell_Features')
+Ileum <- AddModuleScore(object = Ileum, features = entero_features, ctrl = 100, name = 'Enteroendocrine_Features')
+Ileum <- AddModuleScore(object = Ileum, features = entericGlia, ctrl = 100, name = 'EntericGlia_Features')
+```
+
+```{r}
+theme <-theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+            strip.background = element_rect(fill = "grey85", 
+                colour = "grey20"), axis.title.x = element_blank(),  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+ VlnPlot(Ileum, features = c("Olfm4"), pt.size = 0, group.by = "WNN_clusters") + NoLegend() +  theme
+ FeaturePlot_scCustom(Ileum, "StemCell_Features1", reduction = "wnn.umap", na_cutoff = NA)
+  VlnPlot(Ileum, features = c("Chgb"), pt.size = 0, group.by = "WNN_clusters") + NoLegend() +  theme
+ FeaturePlot_scCustom(Ileum, "Enteroendocrine_Features1", reduction = "wnn.umap", na_cutoff = NA)
+  VlnPlot(Ileum, features = c("Muc2"), pt.size = 0, group.by = "WNN_clusters") + NoLegend() +  theme
+ FeaturePlot_scCustom(Ileum, "Goblet_Features1", reduction = "wnn.umap", na_cutoff = NA)
+  VlnPlot(Ileum, features = c("Tslp"), pt.size = 0, group.by = "WNN_clusters") + NoLegend() +  theme
+ FeaturePlot_scCustom(Ileum, "Tuft_Features1", reduction = "wnn.umap", na_cutoff = NA)
+  VlnPlot(Ileum, features = c("Lyz1"), pt.size = 0, group.by = "WNN_clusters") + NoLegend() +  theme
+ FeaturePlot_scCustom(Ileum, "Paneth_Features1", reduction = "wnn.umap", na_cutoff = NA)
+
+ FeaturePlot_scCustom(Ileum, "EntericGlia_Features1", reduction = "wnn.umap", na_cutoff = NA)
+```
+
+
+#Export to H5d and CellxGene for manual annotation
+```{r}
+MLN[["RNA"]] <- JoinLayers(MLN[["RNA"]])
+MLN[["ADT"]] <- JoinLayers(MLN[["ADT"]])
+MLN@reductions$wnn.umap@assay.used <- "RNA"
+#append the protein data so that it can be visualized in cellxgene
+counts_new <- rbind(MLN@assays$RNA$counts, MLN@assays$ADT$counts)
+RNA_only <-CreateSeuratObject(counts = counts_new, assay = "RNA")
+data_new <- rbind(MLN@assays$RNA$data, MLN@assays$ADT$data)
+RNA_only@assays$RNA$data <- data_new
+
+RNA_only@meta.data <- MLN@meta.data
+RNA_only@reductions <- MLN@reductions
+RNA_only@neighbors <- MLN@neighbors
+RNA_only@graphs <- MLN@graphs
+RNA_only[["RNA"]]$scale.data <- NULL 
+RNA_only[["ADT"]] <- NULL
+
+#Some factors need to be converted to characters for the best visualization in cellxgene
+eh <-unlist(RNA_only[["WNN_clusters"]])
+eh <- as.character(eh) 
+RNA_only@meta.data["WNN_clusters"] <- eh 
+eh <-unlist(RNA_only[["Monocle_clusters"]])
+eh <- as.character(eh) 
+RNA_only@meta.data["Monocle_clusters"] <- eh 
+
+#This object is a more complete version of the data 
+RNA_only[["RNA"]] <- as(RNA_only[["RNA"]], "Assay")
+SaveH5Seurat(RNA_only, filename = "/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/MLN_intermediate.h5Seurat", overwrite = T)
+Convert("/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/MLN_intermediate.h5Seurat",   assay = "RNA", dest = "h5ad", overwrite = TRUE)
+remove(RNA_only)
+
+
+#Ileum
+Ileum[["RNA"]] <- JoinLayers(Ileum[["RNA"]])
+Ileum[["ADT"]] <- JoinLayers(Ileum[["ADT"]])
+Ileum@reductions$wnn.umap@assay.used <- "RNA"
+#append the protein data so that it can be visualized in cellxgene
+counts_new <- rbind(Ileum@assays$RNA$counts, Ileum@assays$ADT$counts)
+RNA_only <-CreateSeuratObject(counts = counts_new, assay = "RNA")
+data_new <- rbind(Ileum@assays$RNA$data, Ileum@assays$ADT$data)
+RNA_only@assays$RNA$data <- data_new
+
+RNA_only@meta.data <- Ileum@meta.data
+RNA_only@reductions <- Ileum@reductions
+RNA_only@neighbors <- Ileum@neighbors
+RNA_only@graphs <- Ileum@graphs
+RNA_only[["RNA"]]$scale.data <- NULL 
+RNA_only[["ADT"]] <- NULL
+
+#Some factors need to be converted to characters for the best visualization in cellxgene
+eh <-unlist(RNA_only[["WNN_clusters"]])
+eh <- as.character(eh) 
+RNA_only@meta.data["WNN_clusters"] <- eh 
+eh <-unlist(RNA_only[["Monocle_clusters"]])
+eh <- as.character(eh) 
+RNA_only@meta.data["Monocle_clusters"] <- eh 
+
+#This object is a more complete version of the data 
+RNA_only[["RNA"]] <- as(RNA_only[["RNA"]], "Assay")
+SaveH5Seurat(RNA_only, filename = "/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/Ileum_intermediate.h5Seurat", overwrite = T)
+Convert("/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/Ileum_intermediate.h5Seurat",   assay = "RNA", dest = "h5ad", overwrite = TRUE)
+remove(RNA_only)
+
+```
+
+#Manual Annotation
+```{r}
+#Ileum Monocle Clusters
+ "5", "36", "27", "30", "14", "45", "13", "23", "28", "48", "15", "47", "8", "20", "43", "16", "26", "21", "22", "3", "10", "29", "41", "18" - Enterocyte
+#These cells are Epcam +. They are not high in paneth, goblet, tuft, or stem markers. Given their abundance and the way in which they relate to stem cells, these are enterocytes
+ "12" - Pathogen Responsive Enterocytes
+#These cells have charcteristics of the later enterocytes which can be seen in cellxgene -both terminal enterocytes and cluster 12 express Clca4a and Ly6m which is unique to these cells. However, cluster 12 is entirely (almost) yersinia derived and expresses B3galt5, Nos2, CD38, and higher levels of Reg3b - thus they are Pathogen Responsive
+
+"34" - Stem cells
+# The stem cell feature scoring I did shows this. 
+
+"66", "37" - Transit Amplifying Cells
+#These cells are clustered with enterocyte stem cells but are separated by being in S phase and lie betweent he stemm cells and the enterocytes
+
+"39" - Goblet cells and Paneth Cells - Needs to be subclustered
+# The goblet cell and paneth cell features I score demonstrate this phenotype
+
+"67" - Tuft cells # Identified using score for Tuft Features
+"68" - Enteroendocrine cells # Identified using EEC features scored above
+"71" - Enteric Glia            # These cells are epcam negative. Single R and Azimuth lump them into the fibroblasts broadly. however, they lack expression of some markers like Fbln1 seen in the larger fibroblast cluster. Some of their markers overlap with Stromal cell groups like Sorbs2. Some of their unique markers including Lgi4 and Plp1 led me to enteric glial cells. (S100b, Plp1, Sox10, Gfap, Fabp7). PMID: 35573829
+
+
+#Stromal cells and fibroblasts -In the Coarsest Definition. These are all Stromal cells
+# PMID: 36405734 PMID: 19372102 PMID: 38569542 PMID: 32446219 PMID: 31953387
+"69", "72", "74" -     Stromal cells # Pericytes and SMooth muscle cells #These cells are celled fibromyocytes and smooth muscle by Azimuth. I find that they express Myosin heavy chain 11 and other genes which others have associated with smooth muscle (Myh11, Cnn1, Smtn, Acta2, Tagln) (PMID: 32446219)
+# Cluster 69 is largely multiple with the uppermost prong appearing to be interstitial cells of Cajal which is noted by the co-occurence of Ano1 and Kit (PMID: 19372102) . PMID: 31953387 suggests that many of these cells overlap with pericytes or pericyte like cells - they could be further divided included a population which are Rgs4 high
+"55", "65"  - CD81_pos MRISC Fibroblast  #In other works these are referred to as Ackr4 + Others may also refer to these as Crypto associated
+"49" - CD81_neg Fibroblast
+"73" - Fibroblast_15 # This name stems from a paper (PMID: 38569542) whereby they found a fibroblast population with these markers (Jam2, Ngf, Gdf10)
+
+"11" - Lymphatic Endothelial # Identified by Single R and confirmed with Lyve1 expression
+"52" - Blood Endothelial #Identified with SingleR
+
+"63" - Neutrophil # Single R identified and verified Ly6g
+
+"61" - ILC2 #Identified by SingleR and confirmed expression of KLRG1+ NCr1- and IL17rb +
+"42" - NCR+ and NCR-ILC3 needs to be subclustered #Identified by SingleR - Need to be separated into NCR+ and -. Confirmed IL23r expression confirms ILC3 lineage
+
+
+"1" - CD4 ab T cell # Manually checked and these cells are CD3 and CD4  positive. They lack Trdc
+"54" - Cycling T cells # easily seen by Phase score
+"7" - CD8 ab T cell
+"64" - # These cells are primarily cD4 ab T cells which lack ribosomal reads and are thus distinguished by generally low genes and reads -possibly justifiction for removing them as damaged cells. Their highest defining gene is malat1 which i believe to be nuclear which supports this
+  "57" - Tregs #Foxp3 and Single R determined
+"46" - Cxcr6 CD4 T cell # a popultaion of CD4 ab T cell whic are defined by extremely hgh Rora, CXCR6, Maf, IL18r, and Icos expression. Hwoever, they do not have NK1.1 
+"51" - NK cells #This is evident by their expression of NK1.1 and other genes and heir lack of cD3 - notably this is a somehwat leaky cluster - could potentially be refined as some CD3+ cells might be within
+"6",  - gd T cells #Express the trdc and CD3
+"32" "35", "9" "25" - Activated gd T cells # High i granzymes compared to other gd T cells
+
+"60" GC B cells # As determined by SingleR and Azimuth notably their intermediate expression of Jchain supports this
+"56" Plasma Cells
+
+"17", "33", "38", "53", "19", "4", "31", "40", "44", "50", "2", "24" - B cells #single R determined and checked with CD19 and CD20 (MS4a1)
+"62" - Monocytes #Determined by Single R and Ly6c high check
+"58" - Macrophages #Adgre1 + and determined by SingleR
+"70" - pDC
+"59" -cDC - This is a problematic gate and needs to be separated. A small section appears to be unknown. - B cells?? exress Siglec F? o have just attached to everything #CD11c clearly marks them
+
+
+#Mesenteric Lymph Node
+
+
+"29", "19", "26" - Activated B cell # Indicated by Azimuth. Expression of NMe1 and NMme2 which are involved in class switch might promote this idea
+"39" - Germinal Center B cells # Cycling and identified by azimuth and singleR as GC B cells. Expression of Jchain is slight but present which  supports
+"57" - Plasma cell #Identified by Jchain expression and Ighg1 class switch expression - and Single R 
+"61" - Biphenic Cells # These cells are either doublets (they weren't identified as such) or could be biphenic cells. There is a recent nature paper which identifies this interesting CD3 + Cd19+ cells which seem to originate from the B cell lineage PMID: 38182721
+"49" - Ifn Activated B cells # Identified by Azimuth as such and confirmed by expression of Isg15, IFIt3 and many other IFI and ISg genes as well as Mx2
+
+"1", "47", "13", "2", "32", "33", "34", "18", "41", "44", "7", "46", "16", "12", "25", "5" - B cell # These might be separated but this could best be done by reclustering after filtering them out. Likely includes naive to recently activated B cells. 
+"60" - Neutrophils #Assigned by SignleR and confirmed with Ly6g - mostly yersinia whih might support ths. however, possibly other granulocytes
+
+
+"50" - pDC and Macrophage/ Mono subset # Assigned by Azimuth tonsil and checked with SiglecH and ly6c to see pDC and Ly6c and F4/80 + CD11c+ cd68 + to see Mono / Macrophage
+"56" - CD11b+ cDC2 # Called DCs by Single R and I confirmed they have CD11b and some of them have Sirpa  - none of them are CD8+ or Xcr1+ which is a separate cluster
+"52" - cDC1 and GC B cells subset # Calld CD8 DCs these cells express CD8 and Xcr1 and are clearly cDC1. However. This cluster is large and includes unrelated cells and needs to be subsetted. expression of Igkc and Mzb1 in the B cel half confirm this along with CD79b and the phase which indicates proliferation
+"63" - cDC1  - #Called mature DC1 by Azimuth these cells are clearly related to the cDC1 as they both share expression of Xcr1 and many other genes
+
+"62" - Fibroblasts # Called by Single R and Aziuth. Double checked with Lum, Cd34, Prgfra expression
+"53" CD11b+ cDC # Look similar to other CD11b CDC and Azimuth lumps them together. Expression of DC genes confirmed and do not belong to CD8+ group - will need to revisit in the future. This cluster clearly contains some cells that are interestingly CD4 T cell like
+"58" Cycling T cells #This contains both Cycling CD4 and Cycling CD8 T cells. Can be groups together for now. 
+"59" Selenop cells  #- includes both T cells and CD45- cells that look like DCs and macs but might eb distinct - interestingly they are defined by Selenop expression. This ha been reported in humans to some degree PMID: 38301653. The authors not that these cells are found near the T cell zone  "Noteworthy, SELENOP was mostly expressed at the interfollicular/Tcell zone, while it was absent in the epithelium and follicles (Figure 6E)"
+
+21 Subset - includes a Pd1 cxcr5 expressiong Tfh population, a Tbx21 and cxcr3 expression Th1 population, an il1rl1 (st2) and Gata3+ Th2 population, and an IL17rb/rora high population that could be th17 
+"40", "38" - Tregs # easily identifiable by Foxp3, ctla4, cd11a, icos
+
+"43", "8" - IFN activated CD4 T cells # High expression of Isg15, Ifit1, Ifit3, CD69, Oasl2, Irf7 and other IFN responsive genes
+"17", "28", "9", "48", "45", "20" - Activated CD4 T cell # CD69 expressing less CD27 and CD45, called Naive in Azimuth test - Should do more tests
+"51", "37", "24", "4", "37", "42", "11" - Naive CD4 
+
+"27" - gd CD8 T ccell populations 
+"14" - CD8 T memory
+"31", "35", "23", "22", "6", "3", "30" - Naive CD8
+"36", "10", "15", "14", "55" - Non-Naive CD8
+
+
+
+
+
+
+
+```
+
+
+
+# Subclustering Ileum
+```{r}
+Idents(Ileum) <- "Monocle_clusters"
+cluster_39_all_cells <- WhichCells(Ileum, idents = "39")
+Ileum <- FindSubCluster( Ileum,  "39",  graph.name = "wsnn" , subcluster.name = "sub.cluster_39", resolution = 0.08,  algorithm = 1)
+
+DimPlot(Ileum, reduction = "wnn.umap",   group.by = "sub.cluster_39", label.size = 3, label = TRUE, repel = TRUE, raster = FALSE, cells.highlight = cluster_39_all_cells)+ NoLegend()
+
+DimPlot(Ileum, reduction = "wnn.umap",   group.by = "sub.cluster_39", label.size = 3, label = TRUE, repel = TRUE, raster = FALSE, cells = cluster_39_all_cells)+ NoLegend()
+#Find which subcluster shows the paneth cell markers
+FeaturePlot(Ileum,  reduction = "wnn.umap", cells = cluster_39_all_cells, features = "Paneth_Features1")
+#39_2 is the Paneth Cells
+
+
+Idents(Ileum) <- "Monocle_clusters"
+cluster_42_all_cells <- WhichCells(Ileum, idents = "42")
+Ileum <- FindSubCluster( Ileum,  "42",  graph.name = "wsnn" , subcluster.name = "sub.cluster_42", resolution = 0.08,  algorithm = 1)
+
+DimPlot(Ileum, reduction = "wnn.umap",   group.by = "sub.cluster_42", label.size = 3, label = TRUE, repel = TRUE, raster = FALSE, cells.highlight = cluster_42_all_cells)+ NoLegend()
+
+DimPlot(Ileum, reduction = "wnn.umap",   group.by = "sub.cluster_42", label.size = 3, label = TRUE, repel = TRUE, raster = FALSE, cells = cluster_42_all_cells)+ NoLegend()
+#Find which subcluster shows the paneth cell markers
+FeaturePlot(Ileum,  reduction = "wnn.umap", cells = cluster_42_all_cells, features = "Ncr1")
+#42_0 is NCR+ while 42_1 is NCR negative ILC3
+
+Idents(Ileum) <- "Monocle_clusters"
+cluster_59_all_cells <- WhichCells(Ileum, idents = "59")
+Ileum <- FindSubCluster( Ileum,  "59",  graph.name = "wsnn" , subcluster.name = "sub.cluster_59", resolution = 0.06,  algorithm = 1)
+
+DimPlot(Ileum, reduction = "wnn.umap",   group.by = "sub.cluster_59", label.size = 3, label = TRUE, repel = TRUE, raster = FALSE, cells.highlight = cluster_59_all_cells)+ NoLegend()
+
+DimPlot(Ileum, reduction = "wnn.umap",   group.by = "sub.cluster_59", label.size = 3, label = TRUE, repel = TRUE, raster = FALSE, cells = cluster_59_all_cells)+ NoLegend()
+#Find which subcluster shows the paneth cell markers
+FeaturePlot(Ileum,  reduction = "wnn.umap", cells = cluster_59_all_cells, features = "CD11c")
+#The are now separated into cycling DC (59_2), Xcr1 + DC (59_1), CD11b+ DC (59_0) and the cd11c+ B cells (59_3)
+
+```
+
+#Assign Ileum Annotations
+
+```{r}
+Idents(Ileum) <- "Monocle_clusters"
+Epithelial <- c( "5", "36", "27", "30", "14", "45", "13", "23", "28", "48", "15", "47", "8", "20", "43", "16", "26", "21", "22", "3", "10", "29", "41", "18")
+Ileum@meta.data$CellType[Ileum$Monocle_clusters %in% Epithelial] <- "Enterocyte"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="12" ] <- "Pathogen Responsive Enterocytes"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="34" ] <- "Stem Cells"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="66" | Ileum$Monocle_clusters=="37" ] <- "Transit Amplifying Cells"
+Ileum@meta.data$CellType[Ileum$sub.cluster_39=="39_0" |Ileum$sub.cluster_39=="39_1" ] <- "Goblet Cells"
+Ileum@meta.data$CellType[Ileum$sub.cluster_39=="39_2"] <- "Paneth Cells"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="67" ] <- "Tuft Cells"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="68"] <- "Enteroendocrine Cells"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="71"] <- "Enteric Glia"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="49" ] <- "CD81_neg Fibroblast"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="69"  |Ileum$Monocle_clusters=="72" |Ileum$Monocle_clusters=="74"] <- "Stromal Cells"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="55"  |Ileum$Monocle_clusters=="65" ] <- "CD81_pos MRISC Fibroblast"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="73" ] <- "Fibroblast_15"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="11" ] <- "Lymphatic Endothelial Cells"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="52" ] <- "Blood Endothelial Cells"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="63" ] <- "Neutrophils"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="61" ] <- "ILC2"
+Ileum@meta.data$CellType[Ileum$sub.cluster_42=="42_0" ] <- "NRC_pos ILC3"
+Ileum@meta.data$CellType[Ileum$sub.cluster_42=="42_1" ] <- "NRC_neg ILC3"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="1" |Ileum$Monocle_clusters=="64" ] <- "CD4 abT Cells"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="7" ] <- "CD8 abT Cells"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="54" ] <- "Cycling T Cells"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="57" ] <- "Treg Cells"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="46" ] <- "CXCR6_pos CD4 T Cells"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="51"] <- "NK Cells"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="6"] <- "gdT Cells"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="32" | Ileum$Monocle_clusters=="35"| Ileum$Monocle_clusters=="9"| Ileum$Monocle_clusters=="25"] <- "Activated gdT cell"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="60"] <- "GC B Cells"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="56" ] <- "Plasma Cells"
+B <- c("17", "33", "38", "53", "19", "4", "31", "40", "44", "50", "2", "24")
+Ileum@meta.data$CellType[Ileum$Monocle_clusters %in% B] <- "B Cells"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="62" ] <- "Monocytes"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="58"  ] <- "Macrophages"
+Ileum@meta.data$CellType[Ileum$Monocle_clusters=="70" ] <- "Plasmacytoid DCs"
+Ileum@meta.data$CellType[Ileum$sub.cluster_59=="59_0" ] <- "CD11b_pos DCs"
+Ileum@meta.data$CellType[Ileum$sub.cluster_59=="59_1" ] <- "Xcr1_pos DCs"
+Ileum@meta.data$CellType[Ileum$sub.cluster_59=="59_2" ] <- "Cycling DCs"
+Ileum@meta.data$CellType[Ileum$sub.cluster_59=="59_3" ] <- "CD11c_pos B Cells"
+
+```
+
+
+```{r}
+DimPlot(Ileum, reduction = "wnn.umap",   group.by = "CellType", label.size = 3, label = TRUE, repel = TRUE, raster = FALSE)+ NoLegend()
+```
+
+
+# Subclustering MLN
+```{r}
+Idents(MLN) <- "Monocle_clusters"
+cluster_50_all_cells <- WhichCells(MLN, idents = "50")
+MLN <- FindSubCluster( MLN,  "50",  graph.name = "wsnn" , subcluster.name = "sub.cluster_50", resolution = 0.08,  algorithm = 1)
+
+DimPlot(MLN, reduction = "wnn.umap",   group.by = "sub.cluster_50", label.size = 3, label = TRUE, repel = TRUE, raster = FALSE, cells.highlight = cluster_50_all_cells)+ NoLegend()
+
+DimPlot(MLN, reduction = "wnn.umap",   group.by = "sub.cluster_50", label.size = 3, label = TRUE, repel = TRUE, raster = FALSE, cells = cluster_50_all_cells)+ NoLegend()
+#Find which subcluster shows the paneth cell markers
+FeaturePlot(MLN,  reduction = "wnn.umap", cells = cluster_50_all_cells, features = "Siglech")
+#50_0 Mono MAc , 50_1 pDC, 50_2 CD11b+ cDC2
+
+
+Idents(MLN) <- "Monocle_clusters"
+cluster_52_all_cells <- WhichCells(MLN, idents = "52")
+MLN <- FindSubCluster( MLN,  "52",  graph.name = "wsnn" , subcluster.name = "sub.cluster_52", resolution = 0.05,  algorithm = 1)
+
+DimPlot(MLN, reduction = "wnn.umap",   group.by = "sub.cluster_52", label.size = 3, label = TRUE, repel = TRUE, raster = FALSE, cells.highlight = cluster_52_all_cells)+ NoLegend()
+
+DimPlot(MLN, reduction = "wnn.umap",   group.by = "sub.cluster_52", label.size = 3, label = TRUE, repel = TRUE, raster = FALSE, cells = cluster_52_all_cells)+ NoLegend()
+#Find which subcluster shows the paneth cell markers
+FeaturePlot(MLN,  reduction = "wnn.umap", cells = cluster_52_all_cells, features = "Xcr1")
+#52_0 and 52_2 is XCR1_pos DC while 52_1 is GC B Cells
+
+
+
+Idents(MLN) <- "Monocle_clusters"
+cluster_21_all_cells <- WhichCells(MLN, idents = "21")
+MLN <- FindSubCluster( MLN,  "21",  graph.name = "wsnn" , subcluster.name = "sub.cluster_21", resolution = 0.5,  algorithm = 1)
+
+DimPlot(MLN, reduction = "wnn.umap",   group.by = "sub.cluster_21", label.size = 3, label = TRUE, repel = TRUE, raster = FALSE, cells.highlight = cluster_21_all_cells)+ NoLegend()
+
+DimPlot(MLN, reduction = "wnn.umap",   group.by = "sub.cluster_21", label.size = 3, label = TRUE, repel = TRUE, raster = FALSE, cells = cluster_21_all_cells)+ NoLegend()
+#Find which subcluster shows the paneth cell markers
+FeaturePlot(MLN,  reduction = "wnn.umap", cells = cluster_21_all_cells, features = "Tbx21")
+FeaturePlot(MLN,  reduction = "wnn.umap", cells = cluster_21_all_cells, features = "Sh2d1a")
+FeaturePlot(MLN,  reduction = "wnn.umap", cells = cluster_21_all_cells, features = "Gata3")
+FeaturePlot(MLN,  reduction = "wnn.umap", cells = cluster_21_all_cells, features = "Rora")
+FeaturePlot(MLN,  reduction = "wnn.umap", cells = cluster_21_all_cells, features = "Cd3e")
+#21_5 and 21_6 are Cycling T cells 
+#21_0 and 21_1 are Tfh_like Cells
+#21_2 are Th2_like Cells
+#21_3 are Th1_like Cells
+#21_4 ar ILC2 Cells
+#21_5 and 21_6 are Cycling T cells 
+#21_7, 21_8, 21_9 are Activated CD4 T cells 
+
+```
+
+
+```{r}
+Idents(MLN) <- "Monocle_clusters"
+B <- c("1", "47", "13", "2", "32", "33", "34", "18", "41", "44", "7", "46", "16", "12", "25", "5")
+MLN@meta.data$CellType[MLN$Monocle_clusters %in% B] <- "B Cells"
+MLN@meta.data$CellType[MLN$Monocle_clusters=="29"  |MLN$Monocle_clusters=="19" |MLN$Monocle_clusters=="26"] <- "Activated B Cells"
+MLN@meta.data$CellType[MLN$Monocle_clusters=="39" ] <- "GC B Cells"
+MLN@meta.data$CellType[MLN$sub.cluster_52=="52_1" ] <- "GC B Cells"
+MLN@meta.data$CellType[MLN$sub.cluster_52=="52_2" ] <- "Xcr1_pos DCs"
+MLN@meta.data$CellType[MLN$sub.cluster_52=="52_0" ] <- "Xcr1_pos DCs"
+MLN@meta.data$CellType[MLN$Monocle_clusters=="57" ] <- "Plasma Cells"
+MLN@meta.data$CellType[MLN$Monocle_clusters=="61" ] <- "Biphenic Cells"
+MLN@meta.data$CellType[MLN$Monocle_clusters=="49" ] <- "IFN Activated B cells"
+MLN@meta.data$CellType[MLN$Monocle_clusters=="60" ] <- "Neutrophils"
+MLN@meta.data$CellType[MLN$Monocle_clusters=="54" ] <- "NK Cells"
+MLN@meta.data$CellType[MLN$Monocle_clusters=="56" ] <- "CD11b+ cDC2"
+MLN@meta.data$CellType[MLN$sub.cluster_50=="50_1" ] <- "Plasmacytoid DCs"
+MLN@meta.data$CellType[MLN$sub.cluster_50=="50_2" ] <- "CD11b+ cDC2"
+MLN@meta.data$CellType[MLN$sub.cluster_50=="50_0" ] <- "Monocyte Macrophage"
+MLN@meta.data$CellType[MLN$Monocle_clusters=="63" ] <- "Xcr1_pos DCs"
+MLN@meta.data$CellType[MLN$Monocle_clusters=="62"] <- "Fibroblasts"
+MLN@meta.data$CellType[MLN$Monocle_clusters=="53"] <- "CD11b+ cDC2"
+MLN@meta.data$CellType[MLN$Monocle_clusters=="58" ] <- "Cycling T Cells"
+MLN@meta.data$CellType[MLN$Monocle_clusters=="59" ] <- "Selenop_pos Cells"
+MLN@meta.data$CellType[MLN$sub.cluster_21=="21_0" |MLN$sub.cluster_21=="21_1"] <- "Tfh_like Cells"
+MLN@meta.data$CellType[MLN$sub.cluster_21=="21_2" ] <- "Th2_like Cells"
+MLN@meta.data$CellType[MLN$sub.cluster_21=="21_3" ] <- "Th1_like Cells"
+MLN@meta.data$CellType[MLN$sub.cluster_21=="21_4" ] <- "ILC2 Cells"
+MLN@meta.data$CellType[MLN$sub.cluster_21=="21_5" | MLN$sub.cluster_21=="21_6"] <- "Cycling T Cells"
+MLN@meta.data$CellType[MLN$sub.cluster_21=="21_7" |MLN$sub.cluster_21=="21_8" |MLN$sub.cluster_21=="21_9" ] <- "Activated CD4 T cells"
+A <- c( "51", "37", "24", "4", "37", "42", "11"  )
+MLN@meta.data$CellType[MLN$Monocle_clusters %in% A] <- "Naive CD4 T cells"
+A <- c( "17", "28", "9", "48", "45", "20" )
+MLN@meta.data$CellType[MLN$Monocle_clusters %in% A] <- "Activated CD4 T cells"
+MLN@meta.data$CellType[MLN$Monocle_clusters=="43" | MLN$Monocle_clusters=="8" ] <- "IFN Activated CD4 T Cells"
+MLN@meta.data$CellType[MLN$Monocle_clusters=="40" | MLN$Monocle_clusters=="38" ] <- "Treg Cells"
+A <- c( "31", "35", "23", "22", "6", "3", "30" )
+MLN@meta.data$CellType[MLN$Monocle_clusters %in% A] <- "Naive CD8 T cells"
+A <- c( "36", "10", "15", "14", "55" )
+MLN@meta.data$CellType[MLN$Monocle_clusters %in% A] <- "Non-Naive CD8 T cells"
+MLN@meta.data$CellType[MLN$Monocle_clusters=="14" ] <- "CD8 T memory Cells"
+MLN@meta.data$CellType[MLN$Monocle_clusters=="27" ] <- "gd T Cells"
+
+```
+
+```{r}
+DimPlot(MLN, reduction = "wnn.umap",   group.by = "CellType", label.size = 3, label = TRUE, repel = TRUE, raster = FALSE)+ NoLegend()
+```
+
+#Save the Preliminary File For CellxGene 
+```{r}
+Ileum@reductions$wnn.umap@assay.used <- "RNA"
+#append the protein data so that it can be visualized in cellxgene
+counts_new <- rbind(Ileum@assays$RNA$counts, Ileum@assays$ADT$counts)
+RNA_only <-CreateSeuratObject(counts = counts_new, assay = "RNA")
+data_new <- rbind(Ileum@assays$RNA$data, Ileum@assays$ADT$data)
+RNA_only@assays$RNA$data <- data_new
+
+RNA_only@meta.data <- Ileum@meta.data
+RNA_only@reductions <- Ileum@reductions
+RNA_only@neighbors <- Ileum@neighbors
+RNA_only@graphs <- Ileum@graphs
+RNA_only[["RNA"]]$scale.data <- NULL 
+RNA_only[["ADT"]] <- NULL
+
+nrow(RNA_only@assays$RNA$counts) # 20625
+rownames(RNA_only@assays$RNA$counts)[20600:20607]
+library(SeuratDisk)
+
+#Rename the primary umap so it appears first
+RNA_only[["a.wnn.umap"]] <-Ileum[["wnn.umap"]] 
+
+RNA_only@reductions$integrated.ADT.rpca <- NULL
+RNA_only@reductions$umap.integrated.ADT <- NULL
+RNA_only@reductions$umap_adt_unintegrated <- NULL
+RNA_only@reductions$integrated.rpca <- NULL
+RNA_only@reductions$umap.rpca <- NULL
+RNA_only@reductions$unintegrated_RNA_pca <- NULL
+RNA_only@reductions$unintegrated_RNA_umap <- NULL
+RNA_only@reductions$wnn.umap <- NULL
+RNA_only@reductions$unintegrated_pca_adt <- NULL
+RNA_only@reductions$azimuth.umap <- NULL
+
+RNA_only@meta.data$nCount_ADT <- NULL
+RNA_only@meta.data$nFeature_ADT <- NULL
+RNA_only@meta.data$nFeature_RNA <- NULL
+RNA_only@meta.data$sub.cluster_59 <- NULL
+RNA_only@meta.data$sub.cluster_42 <- NULL
+RNA_only@meta.data$sub.cluster_39 <- NULL
+RNA_only@meta.data$sub.cluster_44 <- NULL
+RNA_only@meta.data$EntericGlia_Features1 <- NULL
+RNA_only@meta.data$Enteroendocrine_Features1 <- NULL
+RNA_only@meta.data$StemCell_Features1 <- NULL
+RNA_only@meta.data$Tuft_Features1 <- NULL
+RNA_only@meta.data$Goblet_Features1 <- NULL
+RNA_only@meta.data$Paneth_Features1 <- NULL
+RNA_only@meta.data$azimuth_lung_l1.score <- NULL
+RNA_only@meta.data$azimuth_lung_l1 <- NULL
+RNA_only@meta.data$azimuth_lung_l2.score <- NULL
+RNA_only@meta.data$azimuth_lung_l2 <- NULL
+RNA_only@meta.data$azimuth_lung_l3 <- NULL
+RNA_only@meta.data$azimuth_lung_l3.score <- NULL
+RNA_only@meta.data$azimuth_lung_l4 <- NULL
+RNA_only@meta.data$azimuth_lung_l4.score <- NULL
+RNA_only@meta.data$azimuth_lung_l5 <- NULL
+RNA_only@meta.data$azimuth_lung_l5.score <- NULL
+RNA_only@meta.data$azimuth_lung_fine <- NULL
+RNA_only@meta.data$azimuth_lung_fine.score <- NULL
+RNA_only@meta.data$SingleR.labels.wnn <- NULL
+RNA_only@meta.data$scDblFinder.cxds_score <- NULL
+RNA_only@meta.data$scDblFinder.weighted <- NULL
+RNA_only@meta.data$scDblFinder.score <- NULL
+RNA_only@meta.data$scDblFinder.difficulty <- NULL
+RNA_only@meta.data$Doublet <- NULL
+RNA_only@meta.data$Monocle_partitions <- NULL
+RNA_only@meta.data$WNN_clusters <- NULL
+RNA_only@meta.data$ADT.weight <- NULL
+RNA_only@meta.data$adt.cluster_unintergrated <- NULL
+RNA_only@meta.data$nCount_RNA <- NULL
+RNA_only@meta.data$drop.class <- NULL
+RNA_only@meta.data$Chemistry <- NULL
+RNA_only@meta.data$unintegrated_RNA_clusters <- NULL
+RNA_only@meta.data$seurat_clusters <- NULL
+RNA_only@meta.data$rpca_integration_clusters <- NULL
+RNA_only@meta.data$S.Score <- NULL
+RNA_only@meta.data$G2M.Score <- NULL
+RNA_only@meta.data$old.ident <- NULL
+RNA_only@meta.data$adt.cluster_unintergrated <- NULL
+RNA_only@meta.data$RNA.weight <- NULL
+RNA_only[["Cell Type (curated)"]] <- RNA_only$CellType
+RNA_only@meta.data$CellType <- NULL
+RNA_only[["Cell Cycle Phase"]] <- RNA_only$Phase
+RNA_only@meta.data$Phase <- NULL
+
+#Some factors need to be converted to characters for the best visualization in cellxgene
+eh <-unlist(RNA_only[["Monocle_clusters"]])
+eh <- as.character(eh) 
+RNA_only@meta.data["Monocle_clusters"] <- eh 
+
+Idents(RNA_only) <- "InfectionStatus"
+RNA_crypto <-subset(RNA_only, idents = "Cryptosporidium")
+RNA_yersinia <-subset(RNA_only, idents = "Yersinia")
+RNA_naive <-subset(RNA_only, idents = "Naive")
+RNA_candida <-subset(RNA_only, idents = "Candida")
+#RNA_poly <-subset(RNA_only, idents = "H.Poly")
+
+Idents(RNA_crypto) <- "Monocle_clusters"
+RNA_crypto <-subset(RNA_crypto, downsample = 300)
+Idents(RNA_naive) <- "Monocle_clusters"
+RNA_naive <-subset(RNA_naive, downsample = 300)
+Idents(RNA_yersinia) <- "Monocle_clusters"
+RNA_yersinia <-subset(RNA_yersinia, downsample = 300)
+Idents(RNA_candida) <- "Monocle_clusters"
+RNA_candida <-subset(RNA_candida, downsample = 300)
+
+cells <- c(colnames(RNA_crypto[["RNA"]]), colnames(RNA_naive[["RNA"]]), colnames(RNA_yersinia[["RNA"]]), colnames(RNA_candida[["RNA"]]))
+RNA_only$CellName <- ifelse(colnames(RNA_only) %in% cells, 'sampled', 'notsampled')
+RNA_only<- subset(RNA_only, subset = CellName == "sampled" ) #66K Cells 
+RNA_only@meta.data$CellName <- NULL
+
+RNA_only[["RNA"]] <- as(RNA_only[["RNA"]], "Assay")
+SaveH5Seurat(RNA_only, filename = "/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/Ileum_CellxGene.h5Seurat", overwrite = T)
+Convert("/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/Ileum_CellxGene.h5Seurat",   assay = "RNA", dest = "h5ad", overwrite = TRUE)
+```
+
+
+```{r}
+MLN@reductions$wnn.umap@assay.used <- "RNA"
+#append the protein data so that it can be visualized in cellxgene
+counts_new <- rbind(MLN@assays$RNA$counts, MLN@assays$ADT$counts)
+RNA_only <-CreateSeuratObject(counts = counts_new, assay = "RNA")
+data_new <- rbind(MLN@assays$RNA$data, MLN@assays$ADT$data)
+RNA_only@assays$RNA$data <- data_new
+
+RNA_only@meta.data <- MLN@meta.data
+RNA_only@reductions <- MLN@reductions
+RNA_only@neighbors <- MLN@neighbors
+RNA_only@graphs <- MLN@graphs
+RNA_only[["RNA"]]$scale.data <- NULL 
+RNA_only[["ADT"]] <- NULL
+
+nrow(RNA_only@assays$RNA$counts) # 20625
+rownames(RNA_only@assays$RNA$counts)[20600:20607]
+library(SeuratDisk)
+
+#Rename the primary umap so it appears first
+RNA_only[["a.wnn.umap"]] <-MLN[["wnn.umap"]] 
+
+RNA_only@reductions$integrated.ADT.rpca <- NULL
+RNA_only@reductions$umap.integrated.ADT <- NULL
+RNA_only@reductions$umap_adt_unintegrated <- NULL
+RNA_only@reductions$integrated.rpca <- NULL
+RNA_only@reductions$umap.rpca <- NULL
+RNA_only@reductions$unintegrated_RNA_pca <- NULL
+RNA_only@reductions$unintegrated_RNA_umap <- NULL
+RNA_only@reductions$wnn.umap <- NULL
+RNA_only@reductions$unintegrated_pca_adt <- NULL
+RNA_only@reductions$azimuth.umap <- NULL
+
+RNA_only@meta.data$nCount_ADT <- NULL
+RNA_only@meta.data$nFeature_ADT <- NULL
+RNA_only@meta.data$nFeature_RNA <- NULL
+RNA_only@meta.data$sub.cluster_50 <- NULL
+RNA_only@meta.data$sub.cluster_52 <- NULL
+RNA_only@meta.data$sub.cluster_21 <- NULL
+RNA_only@meta.data$azimuth_tonsil_l1 <- NULL
+RNA_only@meta.data$azimuth_tonsil_l1.score <- NULL
+RNA_only@meta.data$azimuth_tonsil_l2 <- NULL
+RNA_only@meta.data$azimuth_tonsil_l2.score <- NULL
+RNA_only@meta.data$SingleR.labels.wnn <- NULL
+RNA_only@meta.data$scDblFinder.cxds_score <- NULL
+RNA_only@meta.data$scDblFinder.weighted <- NULL
+RNA_only@meta.data$scDblFinder.score <- NULL
+RNA_only@meta.data$scDblFinder.difficulty <- NULL
+RNA_only@meta.data$Doublet <- NULL
+RNA_only@meta.data$Monocle_partitions <- NULL
+RNA_only@meta.data$WNN_clusters <- NULL
+RNA_only@meta.data$ADT.weight <- NULL
+RNA_only@meta.data$adt.cluster_unintergrated <- NULL
+RNA_only@meta.data$nCount_RNA <- NULL
+RNA_only@meta.data$drop.class <- NULL
+RNA_only@meta.data$Chemistry <- NULL
+RNA_only@meta.data$unintegrated_RNA_clusters <- NULL
+RNA_only@meta.data$seurat_clusters <- NULL
+RNA_only@meta.data$rpca_integration_clusters <- NULL
+RNA_only@meta.data$S.Score <- NULL
+RNA_only@meta.data$G2M.Score <- NULL
+RNA_only@meta.data$old.ident <- NULL
+RNA_only@meta.data$adt.cluster_unintergrated <- NULL
+RNA_only[["Cell Type (curated)"]] <- RNA_only$CellType
+RNA_only@meta.data$CellType <- NULL
+RNA_only[["Cell Cycle Phase"]] <- RNA_only$Phase
+RNA_only@meta.data$Phase <- NULL
+RNA_only@meta.data$InfectionStatus[RNA_only$InfectionStatus=="H.poly" ] <- "H. polygyrus"
+#Some factors need to be converted to characters for the best visualization in cellxgene
+eh <-unlist(RNA_only[["Monocle_clusters"]])
+eh <- as.character(eh) 
+RNA_only@meta.data["Monocle_clusters"] <- eh 
+
+Idents(RNA_only) <- "InfectionStatus"
+RNA_crypto <-subset(RNA_only, idents = "Cryptosporidium")
+RNA_yersinia <-subset(RNA_only, idents = "Yersinia")
+RNA_naive <-subset(RNA_only, idents = "Naive")
+RNA_candida <-subset(RNA_only, idents = "Candida")
+RNA_poly <-subset(RNA_only, idents = "H. polygyrus")
+
+Idents(RNA_crypto) <- "Monocle_clusters"
+RNA_crypto <-subset(RNA_crypto, downsample = 300)
+Idents(RNA_naive) <- "Monocle_clusters"
+RNA_naive <-subset(RNA_naive, downsample = 300)
+Idents(RNA_yersinia) <- "Monocle_clusters"
+RNA_yersinia <-subset(RNA_yersinia, downsample = 300)
+Idents(RNA_candida) <- "Monocle_clusters"
+RNA_candida <-subset(RNA_candida, downsample = 300)
+Idents(RNA_poly) <- "Monocle_clusters"
+RNA_poly <-subset(RNA_poly, downsample = 300)
+
+cells <- c(colnames(RNA_crypto[["RNA"]]), colnames(RNA_naive[["RNA"]]), colnames(RNA_yersinia[["RNA"]]), colnames(RNA_candida[["RNA"]]))
+RNA_only$CellName <- ifelse(colnames(RNA_only) %in% cells, 'sampled', 'notsampled')
+RNA_only<- subset(RNA_only, subset = CellName == "sampled" ) #66K Cells 
+RNA_only@meta.data$CellName <- NULL
+RNA_only$
+RNA_only[["RNA"]] <- as(RNA_only[["RNA"]], "Assay")
+SaveH5Seurat(RNA_only, filename = "/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/MLN_CellxGene.h5Seurat", overwrite = T)
+Convert("/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/MLN_CellxGene.h5Seurat",   assay = "RNA", dest = "h5ad", overwrite = TRUE)
+
+```
+
+#Save Full Objects 
+```{r}
+library(SeuratDisk)
+MLN[["RNA"]] <-  as(MLN[["RNA"]], "Assay")
+MLN[["ADT"]] <-  as(MLN[["ADT"]], "Assay")
+SaveH5Seurat(MLN, filename = "/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/Analysis_2_MLN_Annotated.h5Seurat", overwrite = T)
+Ileum[["RNA"]] <-  as(Ileum[["RNA"]], "Assay")
+Ileum[["ADT"]] <-  as(Ileum[["ADT"]], "Assay")
+SaveH5Seurat(Ileum, filename = "/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/Analysis_2_Ileum_Annotated.h5Seurat", overwrite = T)
+```
+
+
+
+

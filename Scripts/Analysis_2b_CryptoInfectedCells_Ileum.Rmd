@@ -1,0 +1,300 @@
+---
+title: "Analysis_3_CryptoCells"
+author: "AndrewHart"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##Load the Libraries----
+```{r, warning=FALSE, error=FALSE}
+library(Seurat)
+library(Signac)
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(data.table)
+library(cowplot)
+library(scCustomize)
+library(forcats)
+library(ggbreak)
+library(presto)
+library(ggforce)
+library(SingleR)
+library(celldex)
+library(harmony)
+#library(Azimuth)
+library(glmGamPoi)
+library(future)
+library(dsb)
+library(SeuratDisk)
+library(RColorBrewer)
+library(monocle3)
+library(gt)
+options(future.globals.maxSize = 5000 * 1024^2)
+```
+
+#directory set up
+```{r}
+getwd() #/home/hartandrew
+setwd("/data/hartandrew/Projects/MIST/MIST_Analysis")
+out <- "/data/hartandrew/Projects/MIST/MIST_Analysis/Output"
+version <- "/data/hartandrew/Projects/MIST/MIST_Analysis/Version"
+seurat <- "/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files"
+images <- "/data/hartandrew/Projects/MIST/MIST_Analysis/Images"
+CSV <- "/data/hartandrew/Projects/MIST/MIST_Analysis/CSV"
+```
+
+#Color Picking
+```{r}
+# I have chosen 6 colors to represent the 6 different types of infections
+colors6 <- c("#980339", "#379FFB", "#D6A206", "#027102", "#6313B7", "#AFAFAF")
+colors5 <- c("#980339", "#379FFB", "#D6A206", "#027102", "#6313B7")
+```
+
+
+#Load the Files and filter for Cells 
+```{r}
+#CHMI2489_IEL_crypto
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_183/MIST2489_IEL_crypto/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_183/MIST2489_IEL_crypto/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+crypto_CHMI2489_IEL <- CreateSeuratObject(counts = filtered.data, project = "crypto_")
+FeatureScatter(crypto_CHMI2489_IEL, "nCount_RNA", "nFeature_RNA", pt.size = 0.5)
+VlnPlot(crypto_CHMI2489_IEL, features = c("nCount_RNA"), pt.size = 0.1) + ylim(0,12000)
+VlnPlot(crypto_CHMI2489_IEL, features = c("nFeature_RNA"), pt.size = 0.1) + ylim(0,1000)
+length(crypto_CHMI2489_IEL$orig.ident)
+crypto_CHMI2489_IEL <- subset(crypto_CHMI2489_IEL,   nFeature_RNA > 150   & nCount_RNA > 250)
+
+
+#CHMI2489_LP_crypto
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_183/MIST2489_LP_crypto/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_183/MIST2489_LP_crypto/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+crypto_CHMI2489_LP <- CreateSeuratObject(counts = filtered.data, project = "crypto_")
+FeatureScatter(crypto_CHMI2489_LP, "nCount_RNA", "nFeature_RNA", pt.size = 0.5)
+VlnPlot(crypto_CHMI2489_LP, features = c("nCount_RNA"), pt.size = 0.1) + ylim(0,12000)
+VlnPlot(crypto_CHMI2489_LP, features = c("nFeature_RNA"), pt.size = 0.1) + ylim(0,700)
+length(crypto_CHMI2489_LP$orig.ident)
+crypto_CHMI2489_LP <- subset(crypto_CHMI2489_LP,  nFeature_RNA > 150   & nCount_RNA > 250)
+
+
+#CHMI2493_LP_crypto
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_190/MIST2493_LP_crypto/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_190/MIST2493_LP_crypto/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+crypto_CHMI2493_LP <- CreateSeuratObject(counts = filtered.data, project = "crypto_")
+FeatureScatter(crypto_CHMI2493_LP, "nCount_RNA", "nFeature_RNA", pt.size = 0.5)
+VlnPlot(crypto_CHMI2493_LP, features = c("nCount_RNA"), pt.size = 0.1) + ylim(0,12000)
+VlnPlot(crypto_CHMI2493_LP, features = c("nFeature_RNA"), pt.size = 0.1) + ylim(0,1000)
+length(crypto_CHMI2493_LP$orig.ident)
+crypto_CHMI2493_LP <- subset(crypto_CHMI2493_LP,   nFeature_RNA > 150    & nCount_RNA > 250)
+
+
+#CHMI24240_LP_crypto
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_217/MIST24240_LP_Cp/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_217/MIST24240_LP_Cp/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+crypto_CHMI24240_LP <- CreateSeuratObject(counts = filtered.data, project = "crypto_")
+FeatureScatter(crypto_CHMI24240_LP, "nCount_RNA", "nFeature_RNA", pt.size = 0.5)
+VlnPlot(crypto_CHMI24240_LP, features = c("nCount_RNA"), pt.size = 0.1) + ylim(0,12000)
+VlnPlot(crypto_CHMI24240_LP, features = c("nFeature_RNA"), pt.size = 0.1) + ylim(0,1000)
+length(crypto_CHMI24240_LP$orig.ident)
+crypto_CHMI24240_LP <- subset(crypto_CHMI24240_LP,   nFeature_RNA > 150    & nCount_RNA > 250)
+
+
+#CHMI24240_IEL_crypto
+raw.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_217/MIST24240_IEL_Cp/outs/raw_feature_bc_matrix/")
+filtered.data <- Read10X(data.dir = "/data/hartandrew/CellRanger/CHMI_217/MIST24240_IEL_Cp/outs/filtered_feature_bc_matrix/")
+rownames(x = filtered.data[["Antibody Capture"]]) 
+crypto_CHMI24240_IEL <- CreateSeuratObject(counts = filtered.data, project = "crypto_")
+FeatureScatter(crypto_CHMI24240_IEL, "nCount_RNA", "nFeature_RNA", pt.size = 0.5)
+VlnPlot(crypto_CHMI24240_IEL, features = c("nCount_RNA"), pt.size = 0.1) + ylim(0,12000)
+VlnPlot(crypto_CHMI24240_IEL, features = c("nFeature_RNA"), pt.size = 0.1) + ylim(0,1000)
+length(crypto_CHMI24240_IEL$orig.ident)
+crypto_CHMI24240_IEL <- subset(crypto_CHMI24240_IEL,   nFeature_RNA > 150    & nCount_RNA > 250)
+```
+
+
+```{r}
+head(colnames(crypto_CHMI2489_LP))
+#Because of the way they have been merged, the colnames have the orig.ident appended at the beginning. I can manually add this to the crypto alignment so the cell IDs will match
+crypto_CHMI2489_LP_names <- colnames(crypto_CHMI2489_LP)
+colnames(crypto_CHMI2489_LP) <- paste0("CHMI2489_LP_", crypto_CHMI2489_LP_names)
+crypto_CHMI2489_LP_names <- colnames(crypto_CHMI2489_LP)
+crypto_CHMI2489_IEL_names <- colnames(crypto_CHMI2489_IEL)
+colnames(crypto_CHMI2489_IEL) <- paste0("CHMI2489_IEL_", crypto_CHMI2489_IEL_names)
+crypto_CHMI2489_IEL_names <- colnames(crypto_CHMI2489_IEL)
+
+crypto_CHMI2493_LP_names <- colnames(crypto_CHMI2493_LP)
+colnames(crypto_CHMI2493_LP) <- paste0("CHMI2493_LP_", crypto_CHMI2493_LP_names)
+crypto_CHMI2493_LP_names <- colnames(crypto_CHMI2493_LP)
+
+crypto_CHMI24240_LP_names <- colnames(crypto_CHMI24240_LP)
+colnames(crypto_CHMI24240_LP) <- paste0("CHMI24240_LP_", crypto_CHMI24240_LP_names)
+crypto_CHMI24240_LP_names <- colnames(crypto_CHMI24240_LP)
+crypto_CHMI24240_IEL_names <- colnames(crypto_CHMI24240_IEL)
+colnames(crypto_CHMI24240_IEL) <- paste0("CHMI24240_IEL_", crypto_CHMI24240_IEL_names)
+crypto_CHMI24240_IEL_names <- colnames(crypto_CHMI24240_IEL)
+
+
+#Find cell IDS which overlap and given them a metadata label of infection
+#only 3 samples had cells which pass the filters I created  -- 88 in the 2489 IEL, 18 cells in the 2489 LP and 3 cells in the 2493 LP
+infection_vec <- c(crypto_CHMI2489_IEL_names, crypto_CHMI2489_LP_names, crypto_CHMI2493_LP_names, crypto_CHMI24240_IEL_names, crypto_CHMI24240_LP_names)
+length(infection_vec)
+
+write.csv(infection_vec, "/data/hartandrew/Projects/MIST/MIST_Analysis/CSV/cp_infected_cellNames.csv")
+```
+
+#Load the Ileum Objects 
+```{r}
+Ileum <- LoadH5Seurat("/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/Ileum_clustered.h5Seurat")
+Ileum_colNames <- colnames(Ileum[["RNA"]])
+head(Ileum_colNames[Ileum_colNames %like% "CHMI24240_IEL"])
+head(Ileum_colNames[Ileum_colNames %like% "CHMI24240_LP"])
+head(Ileum_colNames[Ileum_colNames %like% "CHMI2489_IEL"])
+head(Ileum_colNames[Ileum_colNames %like% "CHMI2489_LP"])
+head(Ileum_colNames[Ileum_colNames %like% "CHMI2493_LP"])
+```
+
+```{r}
+infection_vec <-read.csv("/data/hartandrew/Projects/MIST/MIST_Analysis/CSV/cp_infected_cellNames.csv")
+infection_vec <-infection_vec$x
+Ileum$Crypto_infected_cells = ifelse(colnames(Ileum) %in% infection_vec, 'Infected', 'Not_Infected')
+Idents(Ileum) <- "Crypto_infected_cells"
+infected <- WhichCells(Ileum, idents = c("Infected"))
+not_infected <- WhichCells(Ileum, idents = c( "Not_Infected"))
+table(Ileum$Crypto_infected_cells)
+DimPlot(Ileum, label=F, reduction = "wnn.umap", cells.highlight= infected, cols.highlight = "darkblue", cols= "grey", sizes.highlight = 1, pt.size = 0.5, raster = FALSE) +NoLegend() +ggtitle("Cells infected by Cryptosporidium \n n=321")
+ggsave("Crypto_Infection_Umap_highlight.png",
+  plot = last_plot(), device = NULL, path = images,  scale = 1,width = 5, height = 5, units = c("in"), dpi = 600,   limitsize = TRUE, bg = NULL)
+```
+
+
+#Save the New Ileum Data
+```{r}
+
+Ileum@reductions$wnn.umap@assay.used <- "RNA"
+#append the protein data so that it can be visualized in cellxgene
+counts_new <- rbind(Ileum@assays$RNA$counts, Ileum@assays$ADT$counts)
+RNA_only <-CreateSeuratObject(counts = counts_new, assay = "RNA")
+data_new <- rbind(Ileum@assays$RNA$data, Ileum@assays$ADT$data)
+RNA_only@assays$RNA$data <- data_new
+
+RNA_only@meta.data <- Ileum@meta.data
+RNA_only@reductions <- Ileum@reductions
+RNA_only@neighbors <- Ileum@neighbors
+RNA_only@graphs <- Ileum@graphs
+RNA_only[["RNA"]]$scale.data <- NULL 
+RNA_only[["ADT"]] <- NULL
+
+nrow(RNA_only@assays$RNA$counts) # 20625
+rownames(RNA_only@assays$RNA$counts)[20600:20607]
+library(SeuratDisk)
+
+#Rename the primary umap so it appears first
+RNA_only[["a.wnn.umap"]] <-Ileum[["wnn.umap"]] 
+
+RNA_only@reductions$integrated.ADT.rpca <- NULL
+RNA_only@reductions$umap.integrated.ADT <- NULL
+RNA_only@reductions$umap_adt_unintegrated <- NULL
+RNA_only@reductions$integrated.rpca <- NULL
+RNA_only@reductions$umap.rpca <- NULL
+RNA_only@reductions$unintegrated_RNA_pca <- NULL
+RNA_only@reductions$unintegrated_RNA_umap <- NULL
+RNA_only@reductions$wnn.umap <- NULL
+RNA_only@reductions$unintegrated_pca_adt <- NULL
+RNA_only@reductions$azimuth.umap <- NULL
+
+RNA_only@meta.data$nCount_ADT <- NULL
+RNA_only@meta.data$nFeature_ADT <- NULL
+RNA_only@meta.data$nFeature_RNA <- NULL
+RNA_only@meta.data$sub.cluster_59 <- NULL
+RNA_only@meta.data$sub.cluster_42 <- NULL
+RNA_only@meta.data$sub.cluster_39 <- NULL
+RNA_only@meta.data$sub.cluster_44 <- NULL
+RNA_only@meta.data$EntericGlia_Features1 <- NULL
+RNA_only@meta.data$Enteroendocrine_Features1 <- NULL
+RNA_only@meta.data$StemCell_Features1 <- NULL
+RNA_only@meta.data$Tuft_Features1 <- NULL
+RNA_only@meta.data$Goblet_Features1 <- NULL
+RNA_only@meta.data$Paneth_Features1 <- NULL
+RNA_only@meta.data$azimuth_lung_l1.score <- NULL
+RNA_only@meta.data$azimuth_lung_l1 <- NULL
+RNA_only@meta.data$azimuth_lung_l2.score <- NULL
+RNA_only@meta.data$azimuth_lung_l2 <- NULL
+RNA_only@meta.data$azimuth_lung_l3 <- NULL
+RNA_only@meta.data$azimuth_lung_l3.score <- NULL
+RNA_only@meta.data$azimuth_lung_l4 <- NULL
+RNA_only@meta.data$azimuth_lung_l4.score <- NULL
+RNA_only@meta.data$azimuth_lung_l5 <- NULL
+RNA_only@meta.data$azimuth_lung_l5.score <- NULL
+RNA_only@meta.data$azimuth_lung_fine <- NULL
+RNA_only@meta.data$azimuth_lung_fine.score <- NULL
+RNA_only@meta.data$SingleR.labels.wnn <- NULL
+RNA_only@meta.data$scDblFinder.cxds_score <- NULL
+RNA_only@meta.data$scDblFinder.weighted <- NULL
+RNA_only@meta.data$scDblFinder.score <- NULL
+RNA_only@meta.data$scDblFinder.difficulty <- NULL
+RNA_only@meta.data$Doublet <- NULL
+RNA_only@meta.data$Monocle_partitions <- NULL
+RNA_only@meta.data$WNN_clusters <- NULL
+RNA_only@meta.data$ADT.weight <- NULL
+RNA_only@meta.data$adt.cluster_unintergrated <- NULL
+RNA_only@meta.data$nCount_RNA <- NULL
+RNA_only@meta.data$drop.class <- NULL
+RNA_only@meta.data$Chemistry <- NULL
+RNA_only@meta.data$unintegrated_RNA_clusters <- NULL
+RNA_only@meta.data$seurat_clusters <- NULL
+RNA_only@meta.data$rpca_integration_clusters <- NULL
+RNA_only@meta.data$S.Score <- NULL
+RNA_only@meta.data$G2M.Score <- NULL
+RNA_only@meta.data$old.ident <- NULL
+RNA_only@meta.data$adt.cluster_unintergrated <- NULL
+RNA_only@meta.data$RNA.weight <- NULL
+RNA_only[["Cell Type (curated)"]] <- RNA_only$CellType
+RNA_only@meta.data$CellType <- NULL
+RNA_only[["Cell Cycle Phase"]] <- RNA_only$Phase
+RNA_only@meta.data$Phase <- NULL
+
+#Some factors need to be converted to characters for the best visualization in cellxgene
+eh <-unlist(RNA_only[["Monocle_clusters"]])
+eh <- as.character(eh) 
+RNA_only@meta.data["Monocle_clusters"] <- eh 
+
+Idents(RNA_only) <- "InfectionStatus"
+RNA_crypto <-subset(RNA_only, idents = "Cryptosporidium")
+RNA_yersinia <-subset(RNA_only, idents = "Yersinia")
+RNA_naive <-subset(RNA_only, idents = "Naive")
+RNA_candida <-subset(RNA_only, idents = "Candida")
+#RNA_poly <-subset(RNA_only, idents = "H.Poly")
+
+Idents(RNA_crypto) <- "Monocle_clusters"
+RNA_crypto <-subset(RNA_crypto, downsample = 300)
+Idents(RNA_naive) <- "Monocle_clusters"
+RNA_naive <-subset(RNA_naive, downsample = 300)
+Idents(RNA_yersinia) <- "Monocle_clusters"
+RNA_yersinia <-subset(RNA_yersinia, downsample = 300)
+Idents(RNA_candida) <- "Monocle_clusters"
+RNA_candida <-subset(RNA_candida, downsample = 300)
+
+cells <- c(colnames(RNA_crypto[["RNA"]]), colnames(RNA_naive[["RNA"]]), colnames(RNA_yersinia[["RNA"]]), colnames(RNA_candida[["RNA"]]))
+RNA_only$CellName <- ifelse(colnames(RNA_only) %in% cells, 'sampled', 'notsampled')
+RNA_only<- subset(RNA_only, subset = CellName == "sampled" ) #66K Cells 
+RNA_only@meta.data$CellName <- NULL
+
+RNA_only[["RNA"]] <- as(RNA_only[["RNA"]], "Assay")
+SaveH5Seurat(RNA_only, filename = "/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/Ileum_CellxGene.h5Seurat", overwrite = T)
+Convert("/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/Ileum_CellxGene.h5Seurat",   assay = "RNA", dest = "h5ad", overwrite = TRUE)
+
+#Save the Complete File
+Ileum[["RNA"]] <-  as(Ileum[["RNA"]], "Assay")
+Ileum[["ADT"]] <-  as(Ileum[["ADT"]], "Assay")
+SaveH5Seurat(Ileum, filename = "/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/Analysis_2_Ileum_Annotated.h5Seurat", overwrite = T)
+```
+
+
+

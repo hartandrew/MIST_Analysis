@@ -1,0 +1,678 @@
+---
+title: "Analysis_4_Investigation1"
+author: "AndrewHart"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##Load the Libraries----
+```{r, warning=FALSE, error=FALSE}
+library(Seurat)
+library(Signac)
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(data.table)
+library(cowplot)
+library(scCustomize)
+library(forcats)
+library(ggbreak)
+library(presto)
+library(ggforce)
+library(SingleR)
+library(celldex)
+library(harmony)
+#library(Azimuth)
+library(glmGamPoi)
+library(future)
+library(dsb)
+library(SeuratDisk)
+library(RColorBrewer)
+library(monocle3)
+library(gt)
+library(pheatmap)
+library(ComplexHeatmap)
+library(SeuratWrappers)
+options(future.globals.maxSize = 5000 * 1024^2)
+```
+
+#directory set up
+```{r}
+getwd() #/home/hartandrew
+setwd("/data/hartandrew/Projects/MIST/MIST_Analysis")
+out <- "/data/hartandrew/Projects/MIST/MIST_Analysis/Output"
+version <- "/data/hartandrew/Projects/MIST/MIST_Analysis/Version"
+seurat <- "/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files"
+images <- "/data/hartandrew/Projects/MIST/MIST_Analysis/Images"
+CSV <- "/data/hartandrew/Projects/MIST/MIST_Analysis/CSV"
+```
+
+#Color Picking
+```{r}
+# I have chosen 6 colors to represent the 6 different types of infections
+colors6 <- c("#980339", "#379FFB", "#D6A206", "#027102", "#6313B7", "#AFAFAF")
+colors5 <- c("#980339", "#379FFB", "#D6A206", "#027102", "#6313B7")
+colors4 <- c("#980339", "#379FFB", "#D6A206", "#027102")
+colors_dup <- c("#980339","#980339", "#379FFB", "#379FFB", "#379FFB", "#D6A206", "#D6A206","#027102" )
+colors_dup2 <- c("#980339","#980339", "#379FFB", "#379FFB",  "#D6A206", "#D6A206", "#027102")
+colors_mln_samp <- c("#980339","#980339", "#379FFB", "#379FFB", "#379FFB", "#D6A206", "#D6A206","#027102","#027102","#6313B7" )
+```
+
+
+#Load the Objects 
+```{r}
+MLN <- LoadH5Seurat("/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/Analysis_2_MLN_Annotated.h5Seurat")
+Ileum <- LoadH5Seurat("/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/Analysis_2_Ileum_Annotated.h5Seurat")
+
+MLN[["RNA"]] <-  as(MLN[["RNA"]], "Assay5")
+MLN[["ADT"]] <-  as(MLN[["ADT"]], "Assay5")
+Ileum[["RNA"]] <-  as(Ileum[["RNA"]], "Assay5")
+Ileum[["ADT"]] <-  as(Ileum[["ADT"]], "Assay5")
+```
+
+
+#Save Graphs of UMAPS
+#Graphs for Dan
+```{r}
+Idents(Ileum) <- "InfectionStatus"
+Crypto_ileum <- WhichCells(Ileum, idents = "Cryptosporidium")
+Yersinia_ileum <- WhichCells(Ileum, idents = "Yersinia")
+Naive_ileum <- WhichCells(Ileum, idents = "Naive")
+Candida_ileum <- WhichCells(Ileum, idents = "Candida")
+
+Idents(Ileum) <- "CellType"
+DimPlot(Ileum, reduction = "wnn.umap",   group.by = "CellType",
+  combine = TRUE, label.size = 2.5, label = TRUE, repel = TRUE, raster = F) + NoLegend()
+ggsave( "Umap_Ileum_CellType.png",  plot = last_plot() , device = NULL,  path = images,  scale = 1,  width = 6,  height = 6,  units = c("in"),  dpi = 600,  limitsize = TRUE,  bg = NULL)
+
+#crypto
+DimPlot(Ileum, reduction = "wnn.umap",   group.by = "CellType", cells = Crypto_ileum,  combine = TRUE, label.size = 3, label = TRUE, repel = T, raster = F) + NoLegend()  +ggtitle("Cryptosporidium")
+ggsave( "Umap_Ileum_CellType_Crypto.png",  plot = last_plot() , device = NULL,  path = images,  scale = 1,  width = 6,  height = 6,  units = c("in"),  dpi = 600,  limitsize = TRUE,  bg = NULL)
+#Yersinia
+DimPlot(Ileum, reduction = "wnn.umap",   group.by = "CellType", cells = Yersinia_ileum,  combine = TRUE, label.size = 3, label = TRUE, repel = T, raster = F) + NoLegend()  +ggtitle("Yersinia")
+ggsave( "Umap_Ileum_CellType_Yersinia.png",  plot = last_plot() , device = NULL,  path = images,  scale = 1,  width = 6,  height = 6,  units = c("in"),  dpi = 600,  limitsize = TRUE,  bg = NULL)
+#Naive
+DimPlot(Ileum, reduction = "wnn.umap",   group.by = "CellType", cells = Naive_ileum,  combine = TRUE, label.size = 3, label = TRUE, repel = T, raster = F) + NoLegend()  +ggtitle("Naive")
+ggsave( "Umap_Ileum_CellType_Naive.png",  plot = last_plot() , device = NULL,  path = images,  scale = 1,  width = 6,  height = 6,  units = c("in"),  dpi = 600,  limitsize = TRUE,  bg = NULL)
+#Candida
+DimPlot(Ileum, reduction = "wnn.umap",   group.by = "CellType", cells = Candida_ileum,  combine = TRUE, label.size = 3, label = TRUE, repel = T, raster = F) + NoLegend()  +ggtitle("Candida")
+ggsave( "Umap_Ileum_CellType_Candida.png",  plot = last_plot() , device = NULL,  path = images,  scale = 1,  width = 6,  height = 6,  units = c("in"),  dpi = 600,  limitsize = TRUE,  bg = NULL)
+```
+```{r}
+Idents(MLN) <- "InfectionStatus"
+Crypto_MLN <- WhichCells(MLN, idents = "Cryptosporidium")
+Yersinia_MLN <- WhichCells(MLN, idents = "Yersinia")
+Naive_MLN <- WhichCells(MLN, idents = "Naive")
+Candida_MLN <- WhichCells(MLN, idents = "Candida")
+Hploy_MLN <- WhichCells(MLN, idents = "H. polygyrus")
+
+Idents(MLN) <- "CellType"
+DimPlot(MLN, reduction = "wnn.umap",   group.by = "CellType",
+  combine = TRUE, label.size = 2.5, label = TRUE, repel = TRUE, raster = F) + NoLegend()
+ggsave( "Umap_MLN_CellType.png",  plot = last_plot() , device = NULL,  path = images,  scale = 1,  width = 6,  height = 6,  units = c("in"),  dpi = 600,  limitsize = TRUE,  bg = NULL)
+
+#crypto
+DimPlot(MLN, reduction = "wnn.umap",   group.by = "CellType", cells = Crypto_MLN,  combine = TRUE, label.size = 3, label = TRUE, repel = T, raster = F) + NoLegend()  +ggtitle("Cryptosporidium")
+ggsave( "Umap_MLN_CellType_Crypto.png",  plot = last_plot() , device = NULL,  path = images,  scale = 1,  width = 6,  height = 6,  units = c("in"),  dpi = 600,  limitsize = TRUE,  bg = NULL)
+#Yersinia
+DimPlot(MLN, reduction = "wnn.umap",   group.by = "CellType", cells = Yersinia_MLN,  combine = TRUE, label.size = 3, label = TRUE, repel = T, raster = F) + NoLegend()  +ggtitle("Yersinia")
+ggsave( "Umap_MLN_CellType_Yersinia.png",  plot = last_plot() , device = NULL,  path = images,  scale = 1,  width = 6,  height = 6,  units = c("in"),  dpi = 600,  limitsize = TRUE,  bg = NULL)
+#Naive
+DimPlot(MLN, reduction = "wnn.umap",   group.by = "CellType", cells = Naive_MLN,  combine = TRUE, label.size = 3, label = TRUE, repel = T, raster = F) + NoLegend()  +ggtitle("Naive")
+ggsave( "Umap_MLN_CellType_Naive.png",  plot = last_plot() , device = NULL,  path = images,  scale = 1,  width = 6,  height = 6,  units = c("in"),  dpi = 600,  limitsize = TRUE,  bg = NULL)
+#Candida
+DimPlot(MLN, reduction = "wnn.umap",   group.by = "CellType", cells = Candida_MLN,  combine = TRUE, label.size = 3, label = TRUE, repel = T, raster = F) + NoLegend()  +ggtitle("Candida")
+ggsave( "Umap_MLN_CellType_Candida.png",  plot = last_plot() , device = NULL,  path = images,  scale = 1,  width = 6,  height = 6,  units = c("in"),  dpi = 600,  limitsize = TRUE,  bg = NULL)
+
+DimPlot(MLN, reduction = "wnn.umap",   group.by = "CellType", cells = Hploy_MLN,  combine = TRUE, label.size = 3, label = TRUE, repel = T, raster = F) + NoLegend()  +ggtitle("H. polygyrus")
+ggsave( "Umap_MLN_CellType_Hpolygyrus.png",  plot = last_plot() , device = NULL,  path = images,  scale = 1,  width = 6,  height = 6,  units = c("in"),  dpi = 600,  limitsize = TRUE,  bg = NULL)
+
+```
+#Examine Disease effects on Cell populations
+```{r}
+# For each sample, determine the number of  cells in each cluster
+cluster_counts <-  table(Ileum@meta.data$CellType, Ileum@meta.data$orig.ident)
+cluster_counts <- as.data.frame(cluster_counts)
+cluster_counts <-reshape2::dcast(cluster_counts, formula = Var1 ~ Var2)
+
+rownames(cluster_counts) <- cluster_counts$Var1
+cluster_counts <- cluster_counts[,2:ncol(cluster_counts)]
+cluster_prop <- mutate(cluster_counts, across(everything(), ~.x/sum(.x)*100))
+colSums(cluster_prop) # should be 100
+cluster_prop$Cluster <- rownames(cluster_counts)
+
+cluster_prop <- melt(cluster_prop, id = "Cluster")
+colnames(cluster_prop) <- c("Cluster", "Sample", "Frequency")
+cluster_prop$Tissue <- as.character(cluster_prop$Sample)
+cluster_prop$Tissue[cluster_prop$Sample %like% "MLN"] <- "MLN"
+cluster_prop$Tissue[cluster_prop$Sample %like% "IEL"] <- "IEL"
+cluster_prop$Tissue[cluster_prop$Sample %like% "LP"] <- "LP"
+
+cluster_prop$Infection[cluster_prop$Sample %like% "CHMI2482" | cluster_prop$Sample %like% "CHMI24109"] <- "Naive"
+cluster_prop$Infection[cluster_prop$Sample %like% "CHMI2489" | cluster_prop$Sample %like% "CHMI2493"| cluster_prop$Sample %like% "CHMI24240"] <- "Cryptosporidium"
+cluster_prop$Infection[cluster_prop$Sample %like% "CHMI24134" | cluster_prop$Sample %like% "CHMI24142"] <- "Yersinia"
+cluster_prop$Infection[cluster_prop$Sample %like% "CHMI24218" | cluster_prop$Sample %like% "CHMI24235"] <- "Candida"
+cluster_prop$sampleXInfection <- paste(cluster_prop$Sample, cluster_prop$Infection, sep="_")
+
+  
+  cluster_prop_LP <- cluster_prop[cluster_prop$Tissue == "LP",]
+cluster_prop_LP$Infection <- factor(cluster_prop_LP$Infection, levels =c("Naive", "Cryptosporidium", "Yersinia", "Candida"))
+cluster_prop_LP$sampleXInfection <- factor(cluster_prop_LP$sampleXInfection, levels =c("CHMI24109_LP_Naive", "CHMI2482_LP_Naive", "CHMI2489_LP_Cryptosporidium", "CHMI2493_LP_Cryptosporidium", "CHMI24240_LP_Cryptosporidium",  "CHMI24142_LP_Yersinia", "CHMI24134_LP_Yersinia", "CHMI24218_LP_Candida"))
+ LP_Frequencies <-  cluster_prop_LP %>%
+   mutate(Cluster = fct_reorder(Cluster, dplyr::desc(Frequency)))  %>%
+ggplot( aes(Cluster, Frequency, fill = sampleXInfection)) + 
+   geom_bar(stat="identity", width=.8, position = "dodge")+  scale_fill_manual(values= colors_dup, breaks = c("CHMI24109_LP_Naive", "CHMI2482_LP_Naive", "CHMI2489_LP_Cryptosporidium", "CHMI2493_LP_Cryptosporidium", "CHMI24240_LP_Cryptosporidium",  "CHMI24142_LP_Yersinia", "CHMI24134_LP_Yersinia", "CHMI24218_LP_Candida")) +
+    theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+          legend.position = "bottom",
+            strip.background = element_rect(fill = "grey85", 
+                colour = "grey20"), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+  LP_Frequencies + ggtitle("Lamina Propria")
+  ggsave( "Frequences_CellType_LP.png",  plot = last_plot() , device = NULL,  path = images,  scale = 1,  width = 6,  height = 6,  units = c("in"),  dpi = 600,  limitsize = TRUE,  bg = NULL)
+  LP_Frequencies  + ggtitle("Lamina Propria") + facet_zoom(ylim = c(0, 5))
+ ggsave( "Frequences_CellType_LP_zoomed.pdf",  plot = last_plot() , device = NULL,  path = images,  scale = 1,  width = 6,  height = 6,  units = c("in"),  dpi = 600,  limitsize = TRUE,  bg = NULL)
+ 
+  
+
+cluster_prop_IEL <- cluster_prop[cluster_prop$Tissue == "IEL",]
+cluster_prop_IEL$Infection <- factor(cluster_prop_IEL$Infection, levels =c("Naive", "Cryptosporidium", "Yersinia", "Candida"))
+cluster_prop_IEL$sampleXInfection <- factor(cluster_prop_IEL$sampleXInfection, levels =c("CHMI24109_IEL_Naive", "CHMI2482_IEL_Naive", "CHMI2489_IEL_Cryptosporidium", "CHMI24240_IEL_Cryptosporidium", "CHMI24142_IEL_Yersinia", "CHMI24134_IEL_Yersinia", "CHMI24218_IEL_Candida"))
+  unique(cluster_prop_IEL$sampleXInfection)
+ IEL_Frequencies <-  cluster_prop_IEL %>%
+   mutate(Cluster = fct_reorder(Cluster, dplyr::desc(Frequency)))  %>%
+ggplot( aes(Cluster, Frequency, fill = sampleXInfection)) + 
+   geom_bar(stat="identity", width=.8, position = "dodge") +  scale_fill_manual(values=colors_dup2, breaks = c("CHMI24109_IEL_Naive", "CHMI2482_IEL_Naive", "CHMI2489_IEL_Cryptosporidium", "CHMI24240_IEL_Cryptosporidium", "CHMI24142_IEL_Yersinia", "CHMI24134_IEL_Yersinia", "CHMI24218_IEL_Candida")) +
+    theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+          legend.position = "bottom",
+            strip.background = element_rect(fill = "grey85", 
+                colour = "grey20"), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+  IEL_Frequencies + ggtitle("IEL")
+    ggsave( "Frequences_CellType_IEL.png",  plot = last_plot() , device = NULL,  path = images,  scale = 1,  width = 6,  height = 6,  units = c("in"),  dpi = 600,  limitsize = TRUE,  bg = NULL)
+  IEL_Frequencies  + ggtitle("IEL") + facet_zoom(ylim = c(0, 5))
+   ggsave( "Frequences_CellType_IEL_zoomed.pdf",  plot = last_plot() , device = NULL,  path = images,  scale = 1,  width = 6,  height = 6,  units = c("in"),  dpi = 600,  limitsize = TRUE,  bg = NULL)
+
+  
+```
+  
+```{r}
+  cluster_counts <-  table(MLN@meta.data$CellType, MLN@meta.data$orig.ident)
+cluster_counts <- as.data.frame(cluster_counts)
+cluster_counts <-reshape2::dcast(cluster_counts, formula = Var1 ~ Var2)
+
+rownames(cluster_counts) <- cluster_counts$Var1
+cluster_counts <- cluster_counts[,2:ncol(cluster_counts)]
+cluster_prop <- mutate(cluster_counts, across(everything(), ~.x/sum(.x)*100))
+colSums(cluster_prop) # should be 100
+cluster_prop$Cluster <- rownames(cluster_counts)
+
+cluster_prop <- melt(cluster_prop, id = "Cluster")
+colnames(cluster_prop) <- c("Cluster", "Sample", "Frequency")
+cluster_prop$Tissue <- as.character(cluster_prop$Sample)
+cluster_prop$Tissue[cluster_prop$Sample %like% "MLN"] <- "MLN"
+
+cluster_prop$Infection[cluster_prop$Sample %like% "CHMI2482" | cluster_prop$Sample %like% "CHMI24109"] <- "Naive"
+cluster_prop$Infection[cluster_prop$Sample %like% "CHMI2489" | cluster_prop$Sample %like% "CHMI2493"| cluster_prop$Sample %like% "CHMI24240"] <- "Cryptosporidium"
+cluster_prop$Infection[cluster_prop$Sample %like% "CHMI24134" | cluster_prop$Sample %like% "CHMI24142"] <- "Yersinia"
+cluster_prop$Infection[cluster_prop$Sample %like% "CHMI24218" | cluster_prop$Sample %like% "CHMI24235"] <- "Candida"
+cluster_prop$Infection[cluster_prop$Sample %like% "CHMI24180" ] <- "H. polygyrus"
+cluster_prop$sampleXInfection <- paste(cluster_prop$Sample, cluster_prop$Infection, sep="_")
+  
+cluster_prop_MLN <- cluster_prop[cluster_prop$Tissue == "MLN",]
+cluster_prop_MLN$Infection <- factor(cluster_prop_MLN$Infection, levels =c("Naive", "Cryptosporidium", "Yersinia", "Candida", "H. polygyrus"))
+cluster_prop_MLN$sampleXInfection <- factor(cluster_prop_MLN$sampleXInfection, levels =c("CHMI24109_MLN_Naive", "CHMI2482_MLN_Naive", "CHMI2489_MLN_Cryptosporidium", "CHMI2493_MLN_Cryptosporidium","CHMI24240_MLN_Cryptosporidium", "CHMI24142_MLN_Yersinia", "CHMI24134_MLN_Yersinia", "CHMI24235_MLN_Candida", "CHMI24218_MLN_Candida", "CHMI24180_MLN_H. polygyrus" ))
+ MLN_Frequencies <-  cluster_prop_MLN %>%
+   mutate(Cluster = fct_reorder(Cluster,  dplyr::desc(Frequency)))  %>%
+ggplot( aes(Cluster, Frequency, fill = sampleXInfection)) + 
+   geom_bar(stat="identity", width=.8, position = "dodge") +  scale_fill_manual(values=colors_mln_samp, breaks = c("CHMI24109_MLN_Naive", "CHMI2482_MLN_Naive", "CHMI2489_MLN_Cryptosporidium", "CHMI2493_MLN_Cryptosporidium","CHMI24240_MLN_Cryptosporidium", "CHMI24142_MLN_Yersinia", "CHMI24134_MLN_Yersinia", "CHMI24235_MLN_Candida", "CHMI24218_MLN_Candida", "CHMI24180_MLN_H. polygyrus" )) +
+    theme(panel.background = element_rect(fill = "white", 
+            colour = NA), panel.border = element_rect(fill = NA, 
+            colour = "grey20"), panel.grid = element_line(colour = "grey92"), 
+            panel.grid.minor = element_line(linewidth = rel(0.5)), 
+          legend.position = "bottom",
+            strip.background = element_rect(fill = "grey85", 
+                colour = "grey20"), axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+  MLN_Frequencies  + ggtitle("MLN")
+      ggsave( "Frequences_CellType_MLN.png",  plot = last_plot() , device = NULL,  path = images,  scale = 1,  width = 6,  height = 6,  units = c("in"),  dpi = 600,  limitsize = TRUE,  bg = NULL)
+  MLN_Frequencies  + ggtitle("MLN") + facet_zoom(ylim = c(0, 5))
+        ggsave( "Frequences_CellType_MLN_zoomed.pdf",  plot = last_plot() , device = NULL,  path = images,  scale = 1,  width = 6,  height = 6,  units = c("in"),  dpi = 600,  limitsize = TRUE,  bg = NULL)
+
+
+
+```
+
+
+#Identify Cell Type Defining Genes
+```{r}
+Ileum <- JoinLayers(Ileum)
+library(presto)
+Idents(object = Ileum) <- "CellType"
+RNA_markers_celltype<- FindAllMarkers( Ileum,  assay = "RNA",
+ features = NULL,  logfc.threshold = 0.1,  test.use = "wilcox",  slot = "data",  min.pct = 0.1,
+ min.diff.pct = -Inf,  node = NULL,  verbose = TRUE,  only.pos = FALSE,  max.cells.per.ident = Inf,
+  random.seed = 1,  min.cells.feature = 3, min.cells.group = 3, base = 2, return.thresh = 0.01)
+
+#Heatmap of RNA determined cluster genes
+RNA_markers_celltype_ileum <- RNA_markers_celltype
+RNA_markers_celltype_ileum %>%  group_by(cluster) %>%  dplyr::filter(avg_log2FC > 1) %>%   slice_head(n = 3) %>% ungroup() -> top3_RNA_Ileum
+
+Idents(Ileum) <- "CellType"
+maxcells  <- min(table(Idents(Ileum)))
+### nested object subsetting with downsampling
+DoHeatmap(subset(Ileum, downsample = 100), features = top5_RNA$gene)+ NoLegend()
+```
+
+```{r}
+Idents(Ileum) <- "CellType"
+mat_Ileum<- subset(Ileum, downsample = 100)
+mat_Ileum_meta <- as.data.frame(mat_Ileum@meta.data )
+mat_Ileum<- mat_Ileum[["RNA"]]$data[top3_RNA_Ileum$gene, ] %>% as.matrix()
+mat_scaled_Ileum <- t(apply(mat_Ileum, 1, scale)) #creates a Zscore for each
+colnames(mat_scaled_Ileum) <- colnames(mat_Ileum)
+groups_factor <- as.factor(mat_Ileum_meta$CellType)
+column_ha <- HeatmapAnnotation(bar = groups_factor)
+fa = mat_Ileum_meta$CellType
+dend1 = cluster_within_group(mat_scaled_Ileum, fa)
+set.seed(20)
+fa_col <- unique(mat_Ileum_meta$CellType)
+h1 <- Heatmap(mat_scaled_Ileum, cluster_rows = F,  show_row_dend = F,show_column_dend = F, column_split = 37,
+              column_labels = ,  name = "Relative Accessibility", row_labels = rownames(mat_scaled_Ileum),
+              cluster_columns = dend1, top_annotation = HeatmapAnnotation(foo = fa, show_legend  = FALSE, show_annotation_name = F, gp= grid::gpar(fontsize = 6)),column_title_rot = 90, 
+              #column_split = groups_factor,
+              show_column_names = F, show_row_names = T, row_names_gp = grid::gpar(fontsize = 8), column_names_gp = grid::gpar(fontsize = 8),
+              col = colorRamp2(c(-3, 0, 3), c("#2000ad", "white", "#e60000"))) #default color blue to red
+h1
+
+# Step 1: Call the pdf command to start the plot
+pdf(file = paste0(images, "/CellType_Markers_Ileum_Heatmap.pdf"),   width = 8, height = 11)
+h1
+dev.off()
+```
+
+```{r}
+MLN <- JoinLayers(MLN)
+library(presto)
+Idents(object = MLN) <- "CellType"
+RNA_markers_celltype<- FindAllMarkers( MLN,  assay = "RNA",
+ features = NULL,  logfc.threshold = 0.1,  test.use = "wilcox",  slot = "data",  min.pct = 0.1,
+ min.diff.pct = -Inf,  node = NULL,  verbose = TRUE,  only.pos = FALSE,  max.cells.per.ident = Inf,
+  random.seed = 1,  min.cells.feature = 3, min.cells.group = 3, base = 2, return.thresh = 0.01)
+
+#Heatmap of RNA determined cluster genes
+RNA_markers_celltype_MLN <- RNA_markers_celltype
+RNA_markers_celltype_MLN %>%  group_by(cluster) %>%  dplyr::filter(avg_log2FC > 1) %>%   slice_head(n = 3) %>% ungroup() -> top3_RNA_MLN
+
+Idents(MLN) <- "CellType"
+maxcells  <- min(table(Idents(MLN)))
+### nested object subsetting with downsampling
+DoHeatmap(subset(MLN, downsample = 100), features = top3_RNA_MLN$gene)+ NoLegend()
+```
+
+```{r}
+Idents(MLN) <- "CellType"
+mat_MLN<- subset(MLN, downsample = 100)
+mat_MLN_meta <- as.data.frame(mat_MLN@meta.data )
+mat_MLN<- mat_MLN[["RNA"]]$data[top3_RNA_MLN$gene, ] %>% as.matrix()
+mat_scaled_MLN <- t(apply(mat_MLN, 1, scale)) #creates a Zscore for each
+colnames(mat_scaled_MLN) <- colnames(mat_MLN)
+groups_factor <- as.factor(mat_MLN_meta$CellType)
+column_ha <- HeatmapAnnotation(bar = groups_factor)
+fa = mat_MLN_meta$CellType
+dend1 = cluster_within_group(mat_scaled_MLN, fa)
+set.seed(20)
+fa_col <- unique(mat_MLN_meta$CellType)
+h1 <- Heatmap(mat_scaled_MLN, cluster_rows = F,  show_row_dend = F,show_column_dend = F, column_split = 27,
+              column_labels = ,  name = "Relative Accessibility", row_labels = rownames(mat_scaled_MLN),
+              cluster_columns = dend1, top_annotation = HeatmapAnnotation(foo = fa, show_legend  = FALSE, show_annotation_name = F, gp= grid::gpar(fontsize = 6)),column_title_rot = 90, 
+              #column_split = groups_factor,
+              show_column_names = F, show_row_names = T, row_names_gp = grid::gpar(fontsize = 8), column_names_gp = grid::gpar(fontsize = 8),
+              col = colorRamp2(c(-3, 0, 3), c("#2000ad", "white", "#e60000"))) #default color blue to red
+h1
+
+# Step 1: Call the pdf command to start the plot
+pdf(file = paste0(images, "/CellType_Markers_MLN_Heatmap.pdf"),   width = 8, height = 11)
+h1
+dev.off()
+```
+
+
+
+```{r}
+#convert the seurat object to cell data 
+
+reductions <- c("unintegrated_RNA_pca",  "unintegrated_RNA_umap", "integrated.rpca",      
+  "umap.rpca", "integrated.harmony", "umap.harmony",  "wnn.umap","azimuth.umap")  
+
+
+ cds <- as.cell_data_set(
+  RNA_only,
+  reductions = "wnn.umap",
+  default.reduction = "wnn.umap",
+  graph =  "wsnn",
+  group.by = NULL
+)
+
+reducedDimNames(cds) <- "UMAP"
+cds <-cluster_cells( cds,  reduction_method = "UMAP", resolution =  1e-5,  k = 20, cluster_method =  "leiden",
+  num_iter = 2, partition_qval = 0.05, weight = FALSE, random_seed = 42, verbose = T)
+```
+
+
+```{r}
+#Visualize how the cells were partitioned and clustered by Monocle - I don't find the parititions useful and don't believe they make sense  
+
+p1 <- plot_cells(cds, color_cells_by = "cluster", show_trajectory_graph = FALSE)
+p2 <- plot_cells(cds, color_cells_by = "partition", show_trajectory_graph = FALSE)
+p1|p2 
+```
+
+
+
+```{r}
+# The epithelial clusters are composed of enterocytes, epithelial SC, tuft cells, paneth cells, goblet cells, and enteroendocrine cells 
+library()
+unique(Ileum$CellType)
+Idents(Ileum) <- "CellType"
+Ileum_epithelial <- subset(x = Ileum, idents = c("Enterocyte", "Stem Cells", "Paneth Cells", "Transit Amplifying Cells",  "Tuft Cells",     "Pathogen Responsive Enterocytes",   "Goblet Cells",    "Enteroendocrine Cells" ))
+
+cds_epithelial <-  as.cell_data_set(  Ileum_epithelial,  reductions = "wnn.umap",  default.reduction = "wnn.umap")
+#Plot Trajectories
+reducedDimNames(cds_epithelial) <- "UMAP"
+cds_epithelial <-cluster_cells( cds_epithelial,  reduction_method = "UMAP", resolution =  NULL,
+  k = 20, cluster_method =  "leiden",  num_iter = 2, partition_qval = 0.05, weight = FALSE,  random_seed = 42, verbose = T)
+
+cds_epithelial <- learn_graph(cds_epithelial, use_partition = F, verbose = F)
+```
+
+
+
+```{r}
+#Add the epithelial pseudotime to the seurat object and visualize 
+plot_cells(cds_epithelial,  color_cells_by = "cluster",  label_groups_by_cluster=FALSE,   label_leaves=FALSE,  label_branch_points=FALSE)
+Idents(Ileum_epithelial) <- "CellType"
+stemCells <- WhichCells(object = Ileum_epithelial, idents = "Stem Cells")
+cds_epithelial <- order_cells(cds_epithelial)
+
+Ileum <- AddMetaData(object = Ileum, metadata = cds_epithelial@principal_graph_aux@listData$UMAP$pseudotime, col.name = "Epithelial_pseudotime")
+
+FeaturePlot_scCustom(Ileum, "Epithelial_pseudotime", reduction = "wnn.umap")  + ggtitle("Pseudotime")
+
+ggsave("Ileum_Umap_Epithelial_monocle_pseudotime.png",
+  plot = last_plot(), device = NULL, path = images,  scale = 1,  width = 5, height = 5, units = c("in"), dpi = 600,   limitsize = TRUE, bg = NULL)
+```
+
+
+```{r}
+#Pseudotime B cells 
+Idents(MLN) <- "CellType"
+unique(Idents(MLN))
+MLN_Bcells <- subset(x = MLN, idents = c("B Cells","Activated B Cells", "IFN Activated B cells",  "GC B Cells", "Plasma Cells", "Biphenic Cells" ))
+
+cds_bcell <-  as.cell_data_set( MLN_Bcells, reductions = "wnn.umap", default.reduction = "wnn.umap")
+
+reducedDimNames(cds_bcell) <- "UMAP"
+cds_bcell <-cluster_cells(  cds_bcell,  reduction_method = "UMAP", resolution = NULL,  k = 20, cluster_method =  "leiden",  num_iter = 2, partition_qval = 0.05, weight = FALSE,  random_seed = 42, verbose = T)
+cds_bcell <- learn_graph(cds_bcell, use_partition = F, verbose = F)
+
+plot_cells(cds_bcell, color_cells_by = "cluster", label_groups_by_cluster=FALSE, label_leaves=FALSE, label_branch_points=FALSE)
+Idents(MLN_Bcells) <- "CellType"
+cds_bcell <- order_cells(cds_bcell)
+
+MLN <- AddMetaData( object = MLN, metadata = cds_bcell@principal_graph_aux@listData$UMAP$pseudotime,  col.name = "Bcell_pseudotime")
+
+FeaturePlot_scCustom(MLN, "Bcell_pseudotime", reduction = "wnn.umap")  + ggtitle("Pseudotime") #picked a naive cluster of B cells with the lowest CD86 and CD69 expression
+ggsave(  "MLN_B_cell_monocle_pseudo.png",  plot = last_plot(), device = NULL, path = images,  scale = 1,
+  width = 5, height = 5, units = c("in"), dpi = 600,   limitsize = TRUE, bg = NULL)
+
+FeaturePlot_scCustom(MLN_Bcells, "Cd86", reduction = "wnn.umap", )  + ggtitle("B Cell CD86") 
+ggsave(  "MLN_B_cell_CD86_Expression.png",  plot = last_plot(), device = NULL, path = images,  scale = 1,
+  width = 5, height = 5, units = c("in"), dpi = 600,   limitsize = TRUE, bg = NULL)
+```
+
+
+
+#Save Full Objects 
+```{r}
+library(SeuratDisk)
+MLN[["RNA"]] <-  as(MLN[["RNA"]], "Assay")
+MLN[["ADT"]] <-  as(MLN[["ADT"]], "Assay")
+SaveH5Seurat(MLN, filename = "/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/Analysis_3_MLN.h5Seurat", overwrite = T)
+Ileum[["RNA"]] <-  as(Ileum[["RNA"]], "Assay")
+Ileum[["ADT"]] <-  as(Ileum[["ADT"]], "Assay")
+SaveH5Seurat(Ileum, filename = "/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/Analysis_3_Ileum.h5Seurat", overwrite = T)
+```
+
+
+
+#Save the Preliminary File For CellxGene 
+```{r}
+Ileum@reductions$wnn.umap@assay.used <- "RNA"
+#append the protein data so that it can be visualized in cellxgene
+counts_new <- rbind(Ileum@assays$RNA$counts, Ileum@assays$ADT$counts)
+RNA_only <-CreateSeuratObject(counts = counts_new, assay = "RNA")
+data_new <- rbind(Ileum@assays$RNA$data, Ileum@assays$ADT$data)
+RNA_only@assays$RNA$data <- data_new
+
+RNA_only@meta.data <- Ileum@meta.data
+RNA_only@reductions <- Ileum@reductions
+RNA_only@neighbors <- Ileum@neighbors
+RNA_only@graphs <- Ileum@graphs
+RNA_only[["RNA"]]$scale.data <- NULL 
+RNA_only[["ADT"]] <- NULL
+
+nrow(RNA_only@assays$RNA$counts) # 20625
+rownames(RNA_only@assays$RNA$counts)[20600:20607]
+library(SeuratDisk)
+
+#Rename the primary umap so it appears first
+RNA_only[["a.wnn.umap"]] <-Ileum[["wnn.umap"]] 
+
+RNA_only@reductions$integrated.ADT.rpca <- NULL
+RNA_only@reductions$umap.integrated.ADT <- NULL
+RNA_only@reductions$umap_adt_unintegrated <- NULL
+RNA_only@reductions$integrated.rpca <- NULL
+RNA_only@reductions$umap.rpca <- NULL
+RNA_only@reductions$unintegrated_RNA_pca <- NULL
+RNA_only@reductions$unintegrated_RNA_umap <- NULL
+RNA_only@reductions$wnn.umap <- NULL
+RNA_only@reductions$unintegrated_pca_adt <- NULL
+RNA_only@reductions$azimuth.umap <- NULL
+
+RNA_only@meta.data$nCount_ADT <- NULL
+RNA_only@meta.data$nFeature_ADT <- NULL
+RNA_only@meta.data$nFeature_RNA <- NULL
+RNA_only@meta.data$sub.cluster_59 <- NULL
+RNA_only@meta.data$sub.cluster_42 <- NULL
+RNA_only@meta.data$sub.cluster_39 <- NULL
+RNA_only@meta.data$sub.cluster_44 <- NULL
+RNA_only@meta.data$EntericGlia_Features1 <- NULL
+RNA_only@meta.data$Enteroendocrine_Features1 <- NULL
+RNA_only@meta.data$StemCell_Features1 <- NULL
+RNA_only@meta.data$Tuft_Features1 <- NULL
+RNA_only@meta.data$Goblet_Features1 <- NULL
+RNA_only@meta.data$Paneth_Features1 <- NULL
+RNA_only@meta.data$azimuth_lung_l1.score <- NULL
+RNA_only@meta.data$azimuth_lung_l1 <- NULL
+RNA_only@meta.data$azimuth_lung_l2.score <- NULL
+RNA_only@meta.data$azimuth_lung_l2 <- NULL
+RNA_only@meta.data$azimuth_lung_l3 <- NULL
+RNA_only@meta.data$azimuth_lung_l3.score <- NULL
+RNA_only@meta.data$azimuth_lung_l4 <- NULL
+RNA_only@meta.data$azimuth_lung_l4.score <- NULL
+RNA_only@meta.data$azimuth_lung_l5 <- NULL
+RNA_only@meta.data$azimuth_lung_l5.score <- NULL
+RNA_only@meta.data$azimuth_lung_fine <- NULL
+RNA_only@meta.data$azimuth_lung_fine.score <- NULL
+RNA_only@meta.data$SingleR.labels.wnn <- NULL
+RNA_only@meta.data$scDblFinder.cxds_score <- NULL
+RNA_only@meta.data$scDblFinder.weighted <- NULL
+RNA_only@meta.data$scDblFinder.score <- NULL
+RNA_only@meta.data$scDblFinder.difficulty <- NULL
+RNA_only@meta.data$Doublet <- NULL
+RNA_only@meta.data$Monocle_partitions <- NULL
+RNA_only@meta.data$WNN_clusters <- NULL
+RNA_only@meta.data$ADT.weight <- NULL
+RNA_only@meta.data$adt.cluster_unintergrated <- NULL
+RNA_only@meta.data$nCount_RNA <- NULL
+RNA_only@meta.data$drop.class <- NULL
+RNA_only@meta.data$Chemistry <- NULL
+RNA_only@meta.data$unintegrated_RNA_clusters <- NULL
+RNA_only@meta.data$seurat_clusters <- NULL
+RNA_only@meta.data$rpca_integration_clusters <- NULL
+RNA_only@meta.data$S.Score <- NULL
+RNA_only@meta.data$G2M.Score <- NULL
+RNA_only@meta.data$old.ident <- NULL
+RNA_only@meta.data$adt.cluster_unintergrated <- NULL
+RNA_only@meta.data$RNA.weight <- NULL
+RNA_only[["Cell Type (curated)"]] <- RNA_only$CellType
+RNA_only@meta.data$CellType <- NULL
+RNA_only[["Cell Cycle Phase"]] <- RNA_only$Phase
+RNA_only@meta.data$Phase <- NULL
+
+#Some factors need to be converted to characters for the best visualization in cellxgene
+eh <-unlist(RNA_only[["Monocle_clusters"]])
+eh <- as.character(eh) 
+RNA_only@meta.data["Monocle_clusters"] <- eh 
+
+Idents(RNA_only) <- "InfectionStatus"
+RNA_crypto <-subset(RNA_only, idents = "Cryptosporidium")
+RNA_yersinia <-subset(RNA_only, idents = "Yersinia")
+RNA_naive <-subset(RNA_only, idents = "Naive")
+RNA_candida <-subset(RNA_only, idents = "Candida")
+#RNA_poly <-subset(RNA_only, idents = "H.Poly")
+
+Idents(RNA_only) <- "Crypto_infected_cells"
+RNA_crypto_infected <-subset(RNA_only, idents = "Infected")
+
+Idents(RNA_crypto) <- "Monocle_clusters"
+RNA_crypto <-subset(RNA_crypto, downsample = 300)
+Idents(RNA_naive) <- "Monocle_clusters"
+RNA_naive <-subset(RNA_naive, downsample = 300)
+Idents(RNA_yersinia) <- "Monocle_clusters"
+RNA_yersinia <-subset(RNA_yersinia, downsample = 300)
+Idents(RNA_candida) <- "Monocle_clusters"
+RNA_candida <-subset(RNA_candida, downsample = 300)
+
+cells <- c(colnames(RNA_crypto[["RNA"]]), colnames(RNA_naive[["RNA"]]), colnames(RNA_yersinia[["RNA"]]), colnames(RNA_candida[["RNA"]]), colnames(RNA_crypto_infected[["RNA"]]))
+RNA_only$CellName <- ifelse(colnames(RNA_only) %in% cells, 'sampled', 'notsampled')
+RNA_only<- subset(RNA_only, subset = CellName == "sampled" ) #66K Cells 
+RNA_only@meta.data$CellName <- NULL
+
+RNA_only[["RNA"]] <- as(RNA_only[["RNA"]], "Assay")
+SaveH5Seurat(RNA_only, filename = "/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/Ileum_CellxGene.h5Seurat", overwrite = T)
+Convert("/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/Ileum_CellxGene.h5Seurat",   assay = "RNA", dest = "h5ad", overwrite = TRUE)
+```
+
+
+```{r}
+MLN@reductions$wnn.umap@assay.used <- "RNA"
+#append the protein data so that it can be visualized in cellxgene
+counts_new <- rbind(MLN@assays$RNA$counts, MLN@assays$ADT$counts)
+RNA_only <-CreateSeuratObject(counts = counts_new, assay = "RNA")
+data_new <- rbind(MLN@assays$RNA$data, MLN@assays$ADT$data)
+RNA_only@assays$RNA$data <- data_new
+
+RNA_only@meta.data <- MLN@meta.data
+RNA_only@reductions <- MLN@reductions
+RNA_only@neighbors <- MLN@neighbors
+RNA_only@graphs <- MLN@graphs
+RNA_only[["RNA"]]$scale.data <- NULL 
+RNA_only[["ADT"]] <- NULL
+
+nrow(RNA_only@assays$RNA$counts) # 20625
+rownames(RNA_only@assays$RNA$counts)[20600:20607]
+library(SeuratDisk)
+
+#Rename the primary umap so it appears first
+RNA_only[["a.wnn.umap"]] <-MLN[["wnn.umap"]] 
+
+RNA_only@reductions$integrated.ADT.rpca <- NULL
+RNA_only@reductions$umap.integrated.ADT <- NULL
+RNA_only@reductions$umap_adt_unintegrated <- NULL
+RNA_only@reductions$integrated.rpca <- NULL
+RNA_only@reductions$umap.rpca <- NULL
+RNA_only@reductions$unintegrated_RNA_pca <- NULL
+RNA_only@reductions$unintegrated_RNA_umap <- NULL
+RNA_only@reductions$wnn.umap <- NULL
+RNA_only@reductions$unintegrated_pca_adt <- NULL
+RNA_only@reductions$azimuth.umap <- NULL
+
+RNA_only@meta.data$nCount_ADT <- NULL
+RNA_only@meta.data$nFeature_ADT <- NULL
+RNA_only@meta.data$nFeature_RNA <- NULL
+RNA_only@meta.data$sub.cluster_50 <- NULL
+RNA_only@meta.data$sub.cluster_52 <- NULL
+RNA_only@meta.data$sub.cluster_21 <- NULL
+RNA_only@meta.data$azimuth_tonsil_l1 <- NULL
+RNA_only@meta.data$azimuth_tonsil_l1.score <- NULL
+RNA_only@meta.data$azimuth_tonsil_l2 <- NULL
+RNA_only@meta.data$azimuth_tonsil_l2.score <- NULL
+RNA_only@meta.data$SingleR.labels.wnn <- NULL
+RNA_only@meta.data$scDblFinder.cxds_score <- NULL
+RNA_only@meta.data$scDblFinder.weighted <- NULL
+RNA_only@meta.data$scDblFinder.score <- NULL
+RNA_only@meta.data$scDblFinder.difficulty <- NULL
+RNA_only@meta.data$Doublet <- NULL
+RNA_only@meta.data$Monocle_partitions <- NULL
+RNA_only@meta.data$WNN_clusters <- NULL
+RNA_only@meta.data$ADT.weight <- NULL
+RNA_only@meta.data$adt.cluster_unintergrated <- NULL
+RNA_only@meta.data$nCount_RNA <- NULL
+RNA_only@meta.data$drop.class <- NULL
+RNA_only@meta.data$Chemistry <- NULL
+RNA_only@meta.data$unintegrated_RNA_clusters <- NULL
+RNA_only@meta.data$seurat_clusters <- NULL
+RNA_only@meta.data$rpca_integration_clusters <- NULL
+RNA_only@meta.data$S.Score <- NULL
+RNA_only@meta.data$G2M.Score <- NULL
+RNA_only@meta.data$old.ident <- NULL
+RNA_only@meta.data$adt.cluster_unintergrated <- NULL
+RNA_only[["Cell Type (curated)"]] <- RNA_only$CellType
+RNA_only@meta.data$CellType <- NULL
+RNA_only[["Cell Cycle Phase"]] <- RNA_only$Phase
+RNA_only@meta.data$Phase <- NULL
+RNA_only@meta.data$InfectionStatus[RNA_only$InfectionStatus=="H.poly" ] <- "H. polygyrus"
+#Some factors need to be converted to characters for the best visualization in cellxgene
+eh <-unlist(RNA_only[["Monocle_clusters"]])
+eh <- as.character(eh) 
+RNA_only@meta.data["Monocle_clusters"] <- eh 
+
+Idents(RNA_only) <- "InfectionStatus"
+RNA_crypto <-subset(RNA_only, idents = "Cryptosporidium")
+RNA_yersinia <-subset(RNA_only, idents = "Yersinia")
+RNA_naive <-subset(RNA_only, idents = "Naive")
+RNA_candida <-subset(RNA_only, idents = "Candida")
+RNA_poly <-subset(RNA_only, idents = "H. polygyrus")
+
+Idents(RNA_crypto) <- "Monocle_clusters"
+RNA_crypto <-subset(RNA_crypto, downsample = 300)
+Idents(RNA_naive) <- "Monocle_clusters"
+RNA_naive <-subset(RNA_naive, downsample = 300)
+Idents(RNA_yersinia) <- "Monocle_clusters"
+RNA_yersinia <-subset(RNA_yersinia, downsample = 300)
+Idents(RNA_candida) <- "Monocle_clusters"
+RNA_candida <-subset(RNA_candida, downsample = 300)
+Idents(RNA_poly) <- "Monocle_clusters"
+RNA_poly <-subset(RNA_poly, downsample = 300)
+
+cells <- c(colnames(RNA_crypto[["RNA"]]), colnames(RNA_naive[["RNA"]]), colnames(RNA_yersinia[["RNA"]]), colnames(RNA_candida[["RNA"]]))
+RNA_only$CellName <- ifelse(colnames(RNA_only) %in% cells, 'sampled', 'notsampled')
+RNA_only<- subset(RNA_only, subset = CellName == "sampled" ) #66K Cells 
+RNA_only@meta.data$CellName <- NULL
+
+RNA_only[["RNA"]] <- as(RNA_only[["RNA"]], "Assay")
+SaveH5Seurat(RNA_only, filename = "/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/MLN_CellxGene.h5Seurat", overwrite = T)
+Convert("/data/hartandrew/Projects/MIST/MIST_Analysis/Seurat_Files/MLN_CellxGene.h5Seurat",   assay = "RNA", dest = "h5ad", overwrite = TRUE)
+
+```
+
+
+
